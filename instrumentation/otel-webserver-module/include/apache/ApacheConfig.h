@@ -54,6 +54,9 @@ public:
     const char* getOtelSamplerType() { return otelSamplerType; }
     int getOtelSamplerTypeInitialized() { return otelSamplerType_initialized; }
 
+    const char* getOtelPropagatorType() { return otelPropagatorType; }
+    int getOtelPropagatorTypeInitialized() { return otelPropagatorType_initialized; }
+
     const char* getServiceNamespace() { return serviceNamespace; }
     int getServiceNamespaceInitialized() { return serviceNamespace_initialized; }
 
@@ -113,6 +116,11 @@ public:
     const char* getSegmentParameter() { return segmentParameter; }
     int getSegmentParameterInitialized() { return segmentParameter_initialized; }
 
+    int getCaptureRequestHeaders() { return captureRequestHeaders; }
+    int getCaptureResponseHeaders() { return captureResponseHeaders; }
+    int getCaptureQueryParameters() { return captureQueryParameters; }
+    const char* getTraceRoutes() { return traceRoutes; }
+
     friend class ApacheConfigHandlers;
 
 private:
@@ -140,6 +148,9 @@ private:
 
     const char *otelSamplerType;        // OPTIONAL: Type of Otel Sampler
     int otelSamplerType_initialized;
+
+    const char *otelPropagatorType;     // OPTIONAL: w3c, b3, or w3c,b3
+    int otelPropagatorType_initialized;
 
     const char *serviceNamespace;       // REQUIRED: A namespace for the ServiceName;
     int serviceNamespace_initialized;
@@ -205,6 +216,15 @@ private:
     int segmentParameter_initialized;   // if FIRST/LAST is choosen above, segment count should be provided.
                                         // if CUSTOM is choosen, segment numbers should be provided such as 2,3
 
+    int captureRequestHeaders;
+    int captureRequestHeaders_initialized;
+    int captureResponseHeaders;
+    int captureResponseHeaders_initialized;
+    int captureQueryParameters;
+    int captureQueryParameters_initialized;
+    const char* traceRoutes;
+    int traceRoutes_initialized;
+
 };
 
 class WebserverContext
@@ -235,6 +255,7 @@ public:
     static const char* otel_set_otelSslCertificatePath(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_otelProcessorType(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_otelSamplerType(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_otelPropagatorType(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceNamespace(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceName(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceInstanceId(cmd_parms *cmd, void *conf, const char *arg);
@@ -254,6 +275,10 @@ public:
     static const char* otel_set_matchPattern(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_segmentType(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_segmentParameter(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_captureRequestHeaders(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_captureResponseHeaders(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_captureQueryParameters(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_traceRoutes(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_add_webserver_context(
             cmd_parms* cmd,
             void* conf,

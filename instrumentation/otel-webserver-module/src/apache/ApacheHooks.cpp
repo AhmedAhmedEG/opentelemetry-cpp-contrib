@@ -17,12 +17,19 @@
 #include "ApacheHooks.h"
 // system headers
 #include <sstream>
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <map>
+#include <vector>
+#include <string>
 #include <unordered_set>
 #include <signal.h>
 #include <sys/types.h>
 #include <unistd.h>
 // apache headers
 #include <apr_strings.h>
+#include <apr_tables.h>
 #include <httpd.h>
 #include <http_config.h> // ap_get_module_config and others
 #include <http_log.h> // ap_log_error and others
@@ -381,6 +388,10 @@ bool ApacheHooks::initialize_opentelemetry(const request_rec *r)
         env_config[ix].value = our_config->getOtelSamplerType();
         ++ix;
 
+        env_config[ix].name = OTEL_SDK_ENV_OTEL_PROPAGATOR_TYPE;
+        env_config[ix].value = our_config->getOtelPropagatorType();
+        ++ix;
+
         // Service Namespace
         env_config[ix].name = OTEL_SDK_ENV_SERVICE_NAMESPACE;
         env_config[ix].value = our_config->getServiceNamespace();
@@ -480,24 +491,277 @@ bool ApacheHooks::otel_requestHasErrors(request_rec* r)
     return r->status >= LOWEST_HTTP_ERROR_CODE;
 }
 
+namespace {
+
+std::string jsonEscape(const std::string& value)
+{
+    std::ostringstream escaped;
+    escaped << '"';
+    for (unsigned char character : value)
+    {
+        switch (character)
+        {
+            case '"': escaped << "\\\""; break;
+            case '\\': escaped << "\\\\"; break;
+            case '\b': escaped << "\\b"; break;
+            case '\f': escaped << "\\f"; break;
+            case '\n': escaped << "\\n"; break;
+            case '\r': escaped << "\\r"; break;
+            case '\t': escaped << "\\t"; break;
+            default:
+                if (character < 0x20)
+                {
+                    escaped << "\\u"
+                            << std::hex << std::uppercase
+                            << static_cast<int>(character)
+                            << std::dec << std::nouppercase;
+                }
+                else
+                {
+                    escaped << character;
+                }
+        }
+    }
+    escaped << '"';
+    return escaped.str();
+}
+
+std::string headersAsJson(const apr_table_t* headers, bool excludeAuthorization)
+{
+    std::map<std::string, std::vector<std::string>> values;
+    if (headers)
+    {
+        const apr_array_header_t* entries = apr_table_elts(headers);
+        const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
+        for (int i = 0; i < entries->nelts; ++i)
+        {
+            const std::string name = table[i].key ? table[i].key : "";
+            std::string lowerName = name;
+            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (excludeAuthorization && lowerName == "authorization")
+            {
+                continue;
+            }
+            values[name].push_back(table[i].val ? table[i].val : "");
+        }
+    }
+
+    std::ostringstream json;
+    if (values.empty()) return "{}";
+    json << "{\n";
+    bool first = true;
+    for (const auto& header : values)
+    {
+        if (!first) json << ",\n";
+        first = false;
+        json << jsonEscape(header.first) << ": ";
+        if (header.second.size() == 1)
+        {
+            json << jsonEscape(header.second.front());
+        }
+        else
+        {
+            json << "[";
+            for (size_t i = 0; i < header.second.size(); ++i)
+            {
+                if (i != 0) json << ",";
+                json << jsonEscape(header.second[i]);
+            }
+            json << "]";
+        }
+    }
+    json << "\n}";
+    return json.str();
+}
+
+int hexValue(char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+std::string urlDecode(const std::string& value)
+{
+    std::string result;
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] == '%' && i + 2 < value.size())
+        {
+            const int high = hexValue(value[i + 1]);
+            const int low = hexValue(value[i + 2]);
+            if (high >= 0 && low >= 0)
+            {
+                result.push_back(static_cast<char>((high << 4) | low));
+                i += 2;
+                continue;
+            }
+        }
+        result.push_back(value[i] == '+' ? ' ' : value[i]);
+    }
+    return result;
+}
+
+std::string queryParametersAsJson(const char* query)
+{
+    std::map<std::string, std::vector<std::string>> values;
+    if (query && *query)
+    {
+        std::string queryString(query);
+        size_t start = 0;
+        while (start <= queryString.size())
+        {
+            const size_t end = queryString.find('&', start);
+            const std::string pair = queryString.substr(start,
+                end == std::string::npos ? std::string::npos : end - start);
+            const size_t separator = pair.find('=');
+            const std::string name = urlDecode(pair.substr(0, separator));
+            const std::string value = separator == std::string::npos
+                ? "" : urlDecode(pair.substr(separator + 1));
+            values[name].push_back(value);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
+
+    std::ostringstream json;
+    if (values.empty()) return "{}";
+    json << "{\n";
+    bool first = true;
+    for (const auto& parameter : values)
+    {
+        if (!first) json << ",\n";
+        first = false;
+        json << jsonEscape(parameter.first) << ": ";
+        if (parameter.second.size() == 1)
+        {
+            json << jsonEscape(parameter.second.front());
+        }
+        else
+        {
+            json << "[";
+            for (size_t i = 0; i < parameter.second.size(); ++i)
+            {
+                if (i != 0) json << ",";
+                json << jsonEscape(parameter.second[i]);
+            }
+            json << "]";
+        }
+    }
+    json << "\n}";
+    return json.str();
+}
+
+const char* requestValue(request_rec* request, const char* name)
+{
+    const char* value = request && request->notes ? apr_table_get(request->notes, name) : nullptr;
+    if (!value && request && request->subprocess_env)
+    {
+        value = apr_table_get(request->subprocess_env, name);
+    }
+    return value;
+}
+
+std::string authorizationValue(const apr_table_t* headers)
+{
+    if (!headers) return "";
+    const apr_array_header_t* entries = apr_table_elts(headers);
+    const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
+    for (int i = 0; i < entries->nelts; ++i)
+    {
+        std::string name = table[i].key ? table[i].key : "";
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "authorization")
+        {
+            return std::string("\n") + (table[i].val ? table[i].val : "") + "\n";
+        }
+    }
+    return "";
+}
+
+std::string upstreamAddress(request_rec* request)
+{
+    const char* value = requestValue(request, "upstream_addr");
+    if (value && *value) return value;
+    value = requestValue(request, "proxy_host");
+    if (value && *value) return value;
+    if (request && request->filename && !strncmp(request->filename, "proxy:", 6))
+    {
+        std::string target(request->filename + 6);
+        const size_t scheme = target.find("://");
+        const size_t hostStart = scheme == std::string::npos ? 0 : scheme + 3;
+        const size_t pathStart = target.find('/', hostStart);
+        return target.substr(hostStart, pathStart == std::string::npos
+            ? std::string::npos : pathStart - hostStart);
+    }
+    return "";
+}
+
+bool routeIsTraceable(const char* path, const char* routes)
+{
+    if (!routes || !*routes) return true;
+    const std::string requestPath = path ? path : "";
+    std::string configured(routes);
+    size_t start = 0;
+    while (start <= configured.size())
+    {
+        const size_t end = configured.find(',', start);
+        std::string route = configured.substr(start,
+            end == std::string::npos ? std::string::npos : end - start);
+        while (!route.empty() && std::isspace(static_cast<unsigned char>(route.front())))
+            route.erase(route.begin());
+        while (!route.empty() && std::isspace(static_cast<unsigned char>(route.back())))
+            route.pop_back();
+        if (!route.empty() &&
+            (requestPath == route ||
+             (requestPath.size() > route.size() &&
+              requestPath.compare(0, route.size(), route) == 0 &&
+              requestPath[route.size()] == '/')))
+        {
+            return true;
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+}
+
 void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payload)
 {
     const char* val;
 
-    // httpHeaders
-    for (auto itr = ApacheHooks::httpHeaders.begin(); itr !=  ApacheHooks::httpHeaders.end(); ++itr)
-    {
-        const char* hdr = *itr;
-        val = apr_table_get(request->headers_in, hdr);
+    otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
+    const bool captureHeaders = !cfg || cfg->getCaptureRequestHeaders();
+    const bool captureQuery = !cfg || cfg->getCaptureQueryParameters();
 
-        if (!val)
+    // Preserve all inbound headers as the propagation carrier and as span attributes.
+    if (captureHeaders && request->headers_in)
+    {
+        const apr_array_header_t* entries = apr_table_elts(request->headers_in);
+        const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
+        for (int i = 0; i < entries->nelts; ++i)
         {
-            val = " ";
+            const std::string name = table[i].key ? table[i].key : "";
+            const std::string value = table[i].val ? table[i].val : "";
+            payload->set_http_headers(name, value);
+            std::string lowerName = name;
+            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            payload->set_http_headers(lowerName, value);
+            if (lowerName != "authorization")
+            {
+                payload->set_request_headers(name, value);
+            }
         }
-        else
-        {
-            payload->set_http_headers(hdr, val);
-        }
+        payload->set_request_attribute("http.request.headers",
+            headersAsJson(request->headers_in, true));
+        payload->set_request_attribute("http.request.headers.authorization",
+            authorizationValue(request->headers_in));
     }
 
     // uri
@@ -523,6 +787,11 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     }
     else val = request->args;
     payload->set_http_get_parameter(val);
+    if (captureQuery)
+    {
+        payload->set_request_attribute("http.query.parameters",
+            queryParametersAsJson(request->args));
+    }
 
     // http_request_method
     val = request->method ? request->method: " ";
@@ -543,6 +812,15 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     {
         payload->set_target(request->unparsed_uri);
     }
+
+    const std::string route = request->parsed_uri.path ? request->parsed_uri.path : "";
+    const std::string scheme = ap_run_http_scheme(request) ? ap_run_http_scheme(request) : "";
+    const std::string host = request->hostname ? request->hostname : "";
+    const std::string target = request->unparsed_uri ? request->unparsed_uri : "";
+    payload->set_request_attribute("http.route", route);
+    payload->set_request_attribute("http.scheme", scheme);
+    payload->set_request_attribute("http.host", host);
+    payload->set_request_attribute("http.url", scheme + "://" + host + target);
 
     switch (request->proto_num)
     {  // TODO: consider using ap_get_protocol for other flavors
@@ -565,6 +843,8 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 #endif
 
     payload->set_port(ap_default_port(request));
+    payload->set_operation_name((request->method ? std::string(request->method) : "")
+        + " " + (request->parsed_uri.path ? request->parsed_uri.path : ""));
 }
 // We have to use this hook if we want to use directory level configuration.
 // post_read_request is too early in the cycle to get the config parameters for a
@@ -574,6 +854,12 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 int ApacheHooks::otel_hook_header_parser_begin(request_rec *r)
 {
     if (!ap_is_initial_req(r))
+    {
+        return DECLINED;
+    }
+    otel_cfg* routeConfig = ApacheConfigHandlers::getConfig(r);
+    if (routeConfig && !routeIsTraceable(
+        r->parsed_uri.path, routeConfig->getTraceRoutes()))
     {
         return DECLINED;
     }
@@ -681,6 +967,36 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
     std::unique_ptr<otel::core::ResponsePayload> responsePayload
         (new otel::core::ResponsePayload);
     responsePayload->status_code = r->status;
+    otel_cfg* requestConfig = ApacheConfigHandlers::getConfig(r);
+    if (!requestConfig || requestConfig->getCaptureResponseHeaders())
+    {
+        const apr_table_t* responseHeaders = r->headers_out;
+        if (r->err_headers_out)
+        {
+            responseHeaders = apr_table_overlay(r->pool, r->headers_out, r->err_headers_out);
+        }
+        responsePayload->response_attributes["http.response.headers"] =
+            headersAsJson(responseHeaders, false);
+    }
+    responsePayload->response_attributes["http.upstream.address"] = upstreamAddress(r);
+    const std::string proxyTarget = r->filename && !strncmp(r->filename, "proxy:", 6)
+        ? std::string(r->filename + 6)
+        : (requestValue(r, "proxy_target") ? requestValue(r, "proxy_target") : "");
+    responsePayload->response_attributes["http.upstream.target"] = proxyTarget;
+    responsePayload->response_attributes["http.proxy.target"] = proxyTarget;
+    const char* upstreamStatus = requestValue(r, "upstream_status");
+    if (!upstreamStatus) upstreamStatus = requestValue(r, "proxy_status");
+    responsePayload->response_attributes["http.upstream.status"] =
+        upstreamStatus ? upstreamStatus : "";
+    const char* upstreamResponseTime = requestValue(r, "upstream_response_time");
+    responsePayload->response_attributes["http.upstream.response_time"] =
+        upstreamResponseTime ? upstreamResponseTime : "";
+    ApacheTracing::writeTrace(r->server, __func__,
+        "upstream target=%s address=%s status=%s response_time=%s",
+        proxyTarget.c_str(),
+        responsePayload->response_attributes["http.upstream.address"].c_str(),
+        responsePayload->response_attributes["http.upstream.status"].c_str(),
+        responsePayload->response_attributes["http.upstream.response_time"].c_str());
 
     if (otel_requestHasErrors(r))
     {

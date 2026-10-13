@@ -21,6 +21,8 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
 // module headers
 #include "ApacheHooks.h"
 #include "ApacheTracing.h"
@@ -167,6 +169,13 @@ const char* ApacheConfigHandlers::otel_set_otelSamplerType(cmd_parms *cmd, void 
 {
     otel_cfg* cfg = (otel_cfg*) conf;
     return helperChar(cmd, cfg, arg, cfg->otelSamplerType, cfg->otelSamplerType_initialized, "otel_set_otelSamplerType");
+}
+
+const char* ApacheConfigHandlers::otel_set_otelPropagatorType(cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperChar(cmd, cfg, arg, cfg->otelPropagatorType,
+        cfg->otelPropagatorType_initialized, "otel_set_otelPropagatorType");
 }
 
 //  char *serviceNamespace;
@@ -397,6 +406,38 @@ const char* ApacheConfigHandlers::otel_set_segmentParameter(cmd_parms *cmd, void
     return NULL;
 }
 
+const char* ApacheConfigHandlers::otel_set_captureRequestHeaders(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperInt(cmd, cfg, arg, cfg->captureRequestHeaders,
+        cfg->captureRequestHeaders_initialized, "otel_set_captureRequestHeaders");
+}
+
+const char* ApacheConfigHandlers::otel_set_captureResponseHeaders(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperInt(cmd, cfg, arg, cfg->captureResponseHeaders,
+        cfg->captureResponseHeaders_initialized, "otel_set_captureResponseHeaders");
+}
+
+const char* ApacheConfigHandlers::otel_set_captureQueryParameters(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperInt(cmd, cfg, arg, cfg->captureQueryParameters,
+        cfg->captureQueryParameters_initialized, "otel_set_captureQueryParameters");
+}
+
+const char* ApacheConfigHandlers::otel_set_traceRoutes(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperChar(cmd, cfg, arg, cfg->traceRoutes,
+        cfg->traceRoutes_initialized, "otel_set_traceRoutes");
+}
+
 std::string ApacheConfigHandlers::computeContextName(const otel_cfg* cfg)
 {
     if (!cfg->serviceNamespace_initialized || !cfg->serviceName_initialized || !cfg->serviceInstanceId_initialized)
@@ -463,6 +504,9 @@ void otel_cfg::init()
     // otelSamplerType              OPTIONAL: Type of Otel Sampler
     otelSamplerType = "ALWAYSON";
     otelSamplerType_initialized = 0;
+
+    otelPropagatorType = "w3c";
+    otelPropagatorType_initialized = 0;
 
     // serviceNamespace             REQUIRED: A namespace for the ServiceName;
     serviceNamespace = "";
@@ -539,6 +583,15 @@ void otel_cfg::init()
     //segmentParameter             OPTIONAL:
     segmentParameter = "2";
     segmentParameter_initialized = 0;
+
+    captureRequestHeaders = 1;
+    captureRequestHeaders_initialized = 0;
+    captureResponseHeaders = 1;
+    captureResponseHeaders_initialized = 0;
+    captureQueryParameters = 1;
+    captureQueryParameters_initialized = 0;
+    traceRoutes = "";
+    traceRoutes_initialized = 0;
 }
 
 bool otel_cfg::validate(const request_rec *r)
@@ -584,6 +637,17 @@ bool otel_cfg::validate(const request_rec *r)
     if (strlen(serviceInstanceId) < 1)
     {
         ApacheTracing::writeError(r->server, __func__, "Service Instance ID not specified - otel not enabled");
+        config_valid = false;
+    }
+
+    std::string propagator = otelPropagatorType;
+    std::transform(propagator.begin(), propagator.end(), propagator.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (propagator != "w3c" && propagator != "b3" &&
+        propagator != "w3c,b3" && propagator != "b3,w3c")
+    {
+        ApacheTracing::writeError(r->server, __func__,
+            "Otel propagator must be w3c, b3, w3c,b3, or b3,w3c");
         config_valid = false;
     }
 
@@ -672,6 +736,10 @@ void* ApacheConfigHandlers::otel_merge_dir_config(apr_pool_t* p, void* parent_co
             apr_pstrdup(p, nconf->otelSamplerType) : apr_pstrdup(p, pconf->otelSamplerType);
     merged_config->otelSamplerType_initialized = 1;
 
+    merged_config->otelPropagatorType = nconf->otelPropagatorType_initialized ?
+        apr_pstrdup(p, nconf->otelPropagatorType) : apr_pstrdup(p, pconf->otelPropagatorType);
+    merged_config->otelPropagatorType_initialized = 1;
+
     // serviceNamespace          REQUIRED: A namespace for the ServiceName;
     merged_config->serviceNamespace = nconf->serviceNamespace_initialized ?
             apr_pstrdup(p, nconf->serviceNamespace) : apr_pstrdup(p, pconf->serviceNamespace);
@@ -745,6 +813,19 @@ void* ApacheConfigHandlers::otel_merge_dir_config(apr_pool_t* p, void* parent_co
     merged_config->segmentParameter = nconf->segmentParameter_initialized ? nconf->segmentParameter : pconf->segmentParameter;
     merged_config->segmentParameter_initialized = 1;
 
+    merged_config->captureRequestHeaders = nconf->captureRequestHeaders_initialized ?
+        nconf->captureRequestHeaders : pconf->captureRequestHeaders;
+    merged_config->captureRequestHeaders_initialized = 1;
+    merged_config->captureResponseHeaders = nconf->captureResponseHeaders_initialized ?
+        nconf->captureResponseHeaders : pconf->captureResponseHeaders;
+    merged_config->captureResponseHeaders_initialized = 1;
+    merged_config->captureQueryParameters = nconf->captureQueryParameters_initialized ?
+        nconf->captureQueryParameters : pconf->captureQueryParameters;
+    merged_config->captureQueryParameters_initialized = 1;
+    merged_config->traceRoutes = nconf->traceRoutes_initialized ?
+        apr_pstrdup(p, nconf->traceRoutes) : apr_pstrdup(p, pconf->traceRoutes);
+    merged_config->traceRoutes_initialized = 1;
+
 
     ApacheTracing::writeTrace(NULL, __func__,
             "(p == %p, parent_conf == %p, newloc_conf == %p)",
@@ -801,6 +882,9 @@ otel_cfg* ApacheConfigHandlers::getProcessConfig(const request_rec* r)
     process_cfg->otelSamplerType = apr_pstrdup(r->server->process->pool, our_config->otelSamplerType);
     process_cfg->otelSamplerType_initialized = our_config->otelSamplerType_initialized;
 
+    process_cfg->otelPropagatorType = apr_pstrdup(r->server->process->pool, our_config->otelPropagatorType);
+    process_cfg->otelPropagatorType_initialized = our_config->otelPropagatorType_initialized;
+
     process_cfg->serviceNamespace = apr_pstrdup(r->server->process->pool, our_config->serviceNamespace);
     process_cfg->serviceNamespace_initialized = our_config->serviceNamespace_initialized;
 
@@ -830,6 +914,14 @@ otel_cfg* ApacheConfigHandlers::getProcessConfig(const request_rec* r)
 
     process_cfg->reportAllInstrumentedModules = our_config->reportAllInstrumentedModules;
     process_cfg->reportAllInstrumentedModules_initialized = our_config->reportAllInstrumentedModules_initialized;
+    process_cfg->captureRequestHeaders = our_config->captureRequestHeaders;
+    process_cfg->captureRequestHeaders_initialized = our_config->captureRequestHeaders_initialized;
+    process_cfg->captureResponseHeaders = our_config->captureResponseHeaders;
+    process_cfg->captureResponseHeaders_initialized = our_config->captureResponseHeaders_initialized;
+    process_cfg->captureQueryParameters = our_config->captureQueryParameters;
+    process_cfg->captureQueryParameters_initialized = our_config->captureQueryParameters_initialized;
+    process_cfg->traceRoutes = apr_pstrdup(r->server->process->pool, our_config->traceRoutes);
+    process_cfg->traceRoutes_initialized = our_config->traceRoutes_initialized;
 
     return process_cfg;
 }

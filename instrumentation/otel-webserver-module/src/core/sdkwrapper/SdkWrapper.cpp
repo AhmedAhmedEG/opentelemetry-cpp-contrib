@@ -19,6 +19,8 @@
 #include "sdkwrapper/ScopedSpan.h"
 #include "sdkwrapper/SdkUtils.h"
 #include "sdkwrapper/SdkHelperFactory.h"
+#include <algorithm>
+#include <cctype>
 
 namespace otel {
 namespace core {
@@ -92,9 +94,15 @@ void SdkWrapper::PopulatePropagationHeaders(
 	}
 	// copy all relevant kv pairs into carrier
 	for (int i = 0; i < CARRIER_HEADER_LEN; i++) {
-		auto carrier_header = otelCarrier.Get(CARRIER_HEADER_NAME[i]).data();
-		if(carrier_header != ""){
-			carrier[CARRIER_HEADER_NAME[i]] = otelCarrier.Get(CARRIER_HEADER_NAME[i]).data();
+		auto carrier_header = otelCarrier.Get(CARRIER_HEADER_NAME[i]);
+		if (carrier_header.empty()) {
+			std::string lowerHeader = CARRIER_HEADER_NAME[i];
+			std::transform(lowerHeader.begin(), lowerHeader.end(), lowerHeader.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			carrier_header = otelCarrier.Get(lowerHeader);
+		}
+		if (!carrier_header.empty()) {
+			carrier[CARRIER_HEADER_NAME[i]] = carrier_header.data();
 		}
 	}
 }

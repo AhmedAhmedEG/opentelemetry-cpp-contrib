@@ -95,6 +95,12 @@ static const command_rec otel_cmds[] =
             OR_ALL,
             "Type of Otel Sampler"),
     AP_INIT_TAKE1(
+            "apacheModuleOtelPropagatorType",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_otelPropagatorType,
+            NULL,
+            OR_ALL,
+            "Incoming and outgoing propagators: w3c, b3, or w3c,b3"),
+    AP_INIT_TAKE1(
             "apacheModuleServiceName",
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_serviceName,
             NULL,
@@ -214,6 +220,30 @@ static const command_rec otel_cmds[] =
             NULL,
             OR_ALL,
             "Specify the segment count or segment numbers that you want to display for Span Creation"),
+    AP_INIT_TAKE1(
+            "apacheModuleCaptureRequestHeaders",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_captureRequestHeaders,
+            NULL,
+            OR_ALL,
+            "Capture all request headers and Authorization separately"),
+    AP_INIT_TAKE1(
+            "apacheModuleCaptureResponseHeaders",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_captureResponseHeaders,
+            NULL,
+            OR_ALL,
+            "Capture all response headers"),
+    AP_INIT_TAKE1(
+            "apacheModuleCaptureQueryParameters",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_captureQueryParameters,
+            NULL,
+            OR_ALL,
+            "Capture decoded query parameters"),
+    AP_INIT_TAKE1(
+            "apacheModuleTraceRoutes",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_traceRoutes,
+            NULL,
+            OR_ALL,
+            "Comma-separated URI prefixes to trace; empty traces all routes"),
     {NULL}
 };
 

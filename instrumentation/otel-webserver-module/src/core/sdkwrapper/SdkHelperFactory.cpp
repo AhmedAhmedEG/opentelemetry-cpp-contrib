@@ -31,6 +31,8 @@
 #include <module_version.h>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <cctype>
 
 namespace otel {
 namespace core {
@@ -99,12 +101,18 @@ SdkHelperFactory::SdkHelperFactory(
     // Adding trace propagator
     auto propagatorType = config->getOtelPropagatorType();
     LOG4CXX_INFO(mLogger, "Propagator type used to read and export Trace and Span info : " << propagatorType);
-    if(propagatorType == PROPAGATOR_TYPE_B3){
+    std::string normalizedPropagatorType = propagatorType;
+    std::transform(normalizedPropagatorType.begin(), normalizedPropagatorType.end(),
+        normalizedPropagatorType.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalizedPropagatorType == PROPAGATOR_TYPE_B3 ||
+        normalizedPropagatorType == "w3c,b3" ||
+        normalizedPropagatorType == "b3,w3c") {
         mPropagators.push_back(
             std::unique_ptr<opentelemetry::trace::propagation::B3PropagatorMultiHeader>(
                 new opentelemetry::trace::propagation::B3PropagatorMultiHeader()));
     }
-    else{
+    if (normalizedPropagatorType != PROPAGATOR_TYPE_B3) {
         mPropagators.push_back(
             std::unique_ptr<opentelemetry::trace::propagation::HttpTraceContext>(
                 new opentelemetry::trace::propagation::HttpTraceContext()));
@@ -232,4 +240,3 @@ OtelSampler SdkHelperFactory::GetSampler(
 } //sdkwrapper
 } //core
 } //otel
-

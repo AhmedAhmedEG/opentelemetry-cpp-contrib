@@ -39,6 +39,7 @@ class RequestPayload
 
 	std::unordered_map<std::string, std::string> http_headers; /* HTTP Request headers: Cookie, Referer, SM_USER*/
 	std::unordered_map<std::string, std::string> request_headers;
+    std::unordered_map<std::string, std::string> request_attributes;
 
 	std::string server_name;
     std::string scheme;
@@ -97,12 +98,21 @@ public:
     std::unordered_map<std::string, std::string>& get_request_headers() {
     	return request_headers;
     }
+    void set_request_attribute(const std::string& key, const std::string& value)
+    {
+        request_attributes[key] = value;
+    }
+    std::unordered_map<std::string, std::string>& get_request_attributes()
+    {
+        return request_attributes;
+    }
 
 };
 
 struct ResponsePayload
 {
 	std::unordered_map<std::string, std::string> response_headers;
+    std::unordered_map<std::string, std::string> response_attributes;
 	std::unordered_map<std::string, std::string> otel_attributes;
 	unsigned int status_code{sdkwrapper::kStatusCodeInit};
 };
