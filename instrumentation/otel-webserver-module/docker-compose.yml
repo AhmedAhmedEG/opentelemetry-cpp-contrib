@@ -30,8 +30,6 @@ services:
             - almalinux8
         ports:
             - "9000:80"
-        depends_on:
-            - otel-collector
     nginx_ubuntu:
         build:
             context: .
