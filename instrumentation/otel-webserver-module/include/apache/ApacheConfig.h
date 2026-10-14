@@ -57,6 +57,9 @@ public:
     const char* getOtelPropagatorType() { return otelPropagatorType; }
     int getOtelPropagatorTypeInitialized() { return otelPropagatorType_initialized; }
 
+    int getOtelPropagatorExtract() { return otelPropagatorExtract; }
+    int getOtelPropagatorInject() { return otelPropagatorInject; }
+
     const char* getServiceNamespace() { return serviceNamespace; }
     int getServiceNamespaceInitialized() { return serviceNamespace_initialized; }
 
@@ -153,6 +156,12 @@ private:
 
     const char *otelPropagatorType;     // OPTIONAL: w3c, b3, or w3c,b3
     int otelPropagatorType_initialized;
+
+    int otelPropagatorExtract;          // OPTIONAL: Extract incoming propagation headers
+    int otelPropagatorExtract_initialized;
+
+    int otelPropagatorInject;           // OPTIONAL: Inject outgoing propagation headers
+    int otelPropagatorInject_initialized;
 
     const char *serviceNamespace;       // REQUIRED: A namespace for the ServiceName;
     int serviceNamespace_initialized;
@@ -262,6 +271,8 @@ public:
     static const char* otel_set_otelProcessorType(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_otelSamplerType(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_otelPropagatorType(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_otelPropagatorExtract(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_otelPropagatorInject(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceNamespace(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceName(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_serviceInstanceId(cmd_parms *cmd, void *conf, const char *arg);

@@ -178,6 +178,20 @@ const char* ApacheConfigHandlers::otel_set_otelPropagatorType(cmd_parms *cmd, vo
         cfg->otelPropagatorType_initialized, "otel_set_otelPropagatorType");
 }
 
+const char* ApacheConfigHandlers::otel_set_otelPropagatorExtract(cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperInt(cmd, cfg, arg, cfg->otelPropagatorExtract,
+        cfg->otelPropagatorExtract_initialized, "otel_set_otelPropagatorExtract");
+}
+
+const char* ApacheConfigHandlers::otel_set_otelPropagatorInject(cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    return helperInt(cmd, cfg, arg, cfg->otelPropagatorInject,
+        cfg->otelPropagatorInject_initialized, "otel_set_otelPropagatorInject");
+}
+
 //  char *serviceNamespace;
 //  int serviceNamespace_initialized;
 const char* ApacheConfigHandlers::otel_set_serviceNamespace(cmd_parms *cmd, void *conf, const char *arg)
@@ -528,6 +542,14 @@ void otel_cfg::init()
     otelPropagatorType = "w3c";
     otelPropagatorType_initialized = 0;
 
+    // otelPropagatorExtract      OPTIONAL: extract incoming propagation headers
+    otelPropagatorExtract = 1;
+    otelPropagatorExtract_initialized = 0;
+
+    // otelPropagatorInject       OPTIONAL: inject outgoing propagation headers
+    otelPropagatorInject = 1;
+    otelPropagatorInject_initialized = 0;
+
     // serviceNamespace             REQUIRED: A namespace for the ServiceName;
     serviceNamespace = "";
     serviceNamespace_initialized = 0;
@@ -764,6 +786,14 @@ void* ApacheConfigHandlers::otel_merge_dir_config(apr_pool_t* p, void* parent_co
         apr_pstrdup(p, nconf->otelPropagatorType) : apr_pstrdup(p, pconf->otelPropagatorType);
     merged_config->otelPropagatorType_initialized = 1;
 
+    merged_config->otelPropagatorExtract = nconf->otelPropagatorExtract_initialized ?
+        nconf->otelPropagatorExtract : pconf->otelPropagatorExtract;
+    merged_config->otelPropagatorExtract_initialized = 1;
+
+    merged_config->otelPropagatorInject = nconf->otelPropagatorInject_initialized ?
+        nconf->otelPropagatorInject : pconf->otelPropagatorInject;
+    merged_config->otelPropagatorInject_initialized = 1;
+
     // serviceNamespace          REQUIRED: A namespace for the ServiceName;
     merged_config->serviceNamespace = nconf->serviceNamespace_initialized ?
             apr_pstrdup(p, nconf->serviceNamespace) : apr_pstrdup(p, pconf->serviceNamespace);
@@ -944,6 +974,10 @@ otel_cfg* ApacheConfigHandlers::getProcessConfig(const request_rec* r)
 
     process_cfg->reportAllInstrumentedModules = our_config->reportAllInstrumentedModules;
     process_cfg->reportAllInstrumentedModules_initialized = our_config->reportAllInstrumentedModules_initialized;
+    process_cfg->otelPropagatorExtract = our_config->otelPropagatorExtract;
+    process_cfg->otelPropagatorExtract_initialized = our_config->otelPropagatorExtract_initialized;
+    process_cfg->otelPropagatorInject = our_config->otelPropagatorInject;
+    process_cfg->otelPropagatorInject_initialized = our_config->otelPropagatorInject_initialized;
     process_cfg->captureRequestHeaders = our_config->captureRequestHeaders;
     process_cfg->captureRequestHeaders_initialized = our_config->captureRequestHeaders_initialized;
     process_cfg->captureResponseHeaders = our_config->captureResponseHeaders;
@@ -989,6 +1023,8 @@ void ApacheConfigHandlers::traceConfig(const request_rec* r, const otel_cfg* cfg
                 "(OtelSpanExporter=\"%s\")"
                 "(OtelSpanProcessor=\"%s\")"
                 "(OtelSampler=\"%s\")"
+                "(OtelPropagatorExtract=\"%d\")"
+                "(OtelPropagatorInject=\"%d\")"
                 "(ServiceNamespace=\"%s\")"
                 "(ServiceName=\"%s\")"
                 "(ServiceInstanceId=\"%s\")"
@@ -1011,6 +1047,8 @@ void ApacheConfigHandlers::traceConfig(const request_rec* r, const otel_cfg* cfg
             cfg->otelExporterType,
             cfg->otelProcessorType,
             cfg->otelSamplerType,
+            cfg->otelPropagatorExtract,
+            cfg->otelPropagatorInject,
             cfg->serviceNamespace,
             cfg->serviceName,
             cfg->serviceInstanceId,

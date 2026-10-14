@@ -30,6 +30,8 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `OtelSpanProcessor` | `batch` or `simple`. |
 | `OtelSampler` | `always_on` or `always_off`; other samplers are unimplemented. |
 | `OtelPropagatorType` | `w3c`, `b3` (multi-header), `w3c,b3`, or `b3,w3c`. |
+| `OtelPropagatorExtract` | `ON` / `OFF`: accept incoming propagation headers as the server-span parent. Default `ON`. |
+| `OtelPropagatorInject` | `ON` / `OFF`: write the current client-span context to outgoing propagation headers. Default `ON`. |
 | `OtelMaxQueueSize` | Integer; accepted but not applied in this version. |
 | `OtelScheduledDelayMillis` | Milliseconds; accepted but not applied. |
 | `OtelExportTimeoutMillis` | Milliseconds; accepted but not applied. |
@@ -53,7 +55,9 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `Matchfilter` | URL filter type; currently unused. |
 | `Matchpattern` | URL filter pattern; currently unused. |
 
-Header lists match case-insensitively; quote lists containing spaces. Listed
+Header lists match case-insensitively; quote lists containing spaces. Propagation
+uses the configured standard propagator headers only; no custom parent-span
+header is generated. Listed
 headers move out of the combined JSON into `http.request.headers.<lowercase>`
 or `http.response.headers.<lowercase>`. Repeated values use a JSON array string;
 missing headers produce no attribute. Lists replace inherited lists. Other

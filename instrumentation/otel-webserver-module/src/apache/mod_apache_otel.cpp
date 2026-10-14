@@ -101,6 +101,18 @@ static const command_rec otel_cmds[] =
             OR_ALL,
             "Incoming and outgoing propagators: w3c, b3, or w3c,b3"),
     AP_INIT_TAKE1(
+            "ApacheModuleOtelPropagatorExtract",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_otelPropagatorExtract,
+            NULL,
+            OR_ALL,
+            "Extract incoming propagation headers (ON or OFF)"),
+    AP_INIT_TAKE1(
+            "ApacheModuleOtelPropagatorInject",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_otelPropagatorInject,
+            NULL,
+            OR_ALL,
+            "Inject outgoing propagation headers (ON or OFF)"),
+    AP_INIT_TAKE1(
             "apacheModuleServiceName",
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_serviceName,
             NULL,

@@ -299,6 +299,12 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
 //-----------------------------------------------------------------------------------------
 void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_map<std::string, std::string> propagationHeaders)
 {
+    otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
+    if (cfg && !cfg->getOtelPropagatorInject())
+    {
+        return;
+    }
+
     for (auto itr = propagationHeaders.begin(); itr != propagationHeaders.end(); itr++)
     {
         // put the correlation information into the http headers
@@ -776,10 +782,11 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 
     otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
     const bool captureHeaders = !cfg || cfg->getCaptureRequestHeaders();
+    const bool extractPropagation = !cfg || cfg->getOtelPropagatorExtract();
     const bool captureQuery = !cfg || cfg->getCaptureQueryParameters();
     const auto separateHeaders = separateHeaderNames(cfg ? cfg->getSeparateRequestHeaders() : "");
 
-    // Preserve all inbound headers as the propagation carrier and as span attributes.
+    // Keep inbound headers available for attributes and optionally for propagation.
     if (request->headers_in)
     {
         const apr_array_header_t* entries = apr_table_elts(request->headers_in);
@@ -788,11 +795,13 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
         {
             const std::string name = table[i].key ? table[i].key : "";
             const std::string value = table[i].val ? table[i].val : "";
-            payload->set_http_headers(name, value);
             std::string lowerName = name;
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            payload->set_http_headers(lowerName, value);
+            if (extractPropagation)
+            {
+                payload->set_http_headers(lowerName, value);
+            }
             if (captureHeaders && !separateHeaders.count(lowerName))
             {
                 payload->set_request_headers(name, value);
