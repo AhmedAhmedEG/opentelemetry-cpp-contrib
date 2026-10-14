@@ -31,6 +31,7 @@
 // apache headers
 #include <apr_strings.h>
 #include <apr_tables.h>
+#include <apr_optional_hooks.h>
 #include <httpd.h>
 #include <http_config.h> // ap_get_module_config and others
 #include <http_log.h> // ap_log_error and others
@@ -61,8 +62,24 @@ otel::core::WSAgent wsAgent; // global variable for interface between Hooks and 
 
 using namespace otel::core::sdkwrapper;
 
+namespace {
+const char* const OTEL_PROPAGATION_KEY = "otel_authoritative_propagation";
+
+void clearTraceHeaders(request_rec* request)
+{
+    for (const char* header : {"traceparent", "tracestate", "b3",
+            "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "X-B3-Flags",
+            "X-B3-ParentSpanId", "Parent_Span_Id"})
+        apr_table_unset(request->headers_in, header);
+}
+}
+
 void ApacheHooks::registerHooks(apr_pool_t *p)
 {
+    // mod_proxy calls this optional hook immediately before serializing
+    // HTTP(S) request headers. No hard dependency on mod_proxy is introduced.
+    apr_optional_hook_add("fixups", reinterpret_cast<void (*)(void)>(otel_proxy_fixups),
+        NULL, NULL, APR_HOOK_REALLY_LAST + 2);
     // Place a hook that executes when a child process is spawned
     // (commonly used for initializing modules after the server has forked)
     ap_hook_child_init(otel_child_init, NULL, NULL, APR_HOOK_MIDDLE);
@@ -309,17 +326,14 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
     // Replace the complete wire context. A freshly generated trace often has
     // no tracestate, so merely setting returned fields leaves stale input
     // state behind. Also remove alternate formats the backend might prefer.
-    for (const char* header : {"traceparent", "tracestate", "b3",
-            "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "X-B3-Flags",
-            "X-B3-ParentSpanId", "Parent_Span_Id"})
-    {
-        apr_table_unset(request->headers_in, header);
-    }
+    clearTraceHeaders(request);
+    apr_table_t* authoritative = apr_table_make(request->pool, propagationHeaders.size());
 
     for (auto itr = propagationHeaders.begin(); itr != propagationHeaders.end(); itr++)
     {
         // This is SDK metadata for the legacy NGINX adapter, not an HTTP header.
         if (itr->first == "Parent_Span_Id") continue;
+        apr_table_set(authoritative, itr->first.c_str(), itr->second.c_str());
         // put the correlation information into the http headers
         apr_table_set(request->headers_in, itr->first.c_str(), itr->second.c_str());
 
@@ -328,6 +342,43 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
                 itr->first.c_str(),
                 itr->second.c_str());
     }
+    apr_pool_userdata_set(authoritative, OTEL_PROPAGATION_KEY,
+        apr_pool_cleanup_null, request->pool);
+}
+
+int ApacheHooks::otel_proxy_fixups(request_rec* request)
+{
+    otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
+    if (cfg && !cfg->getOtelPropagatorInject()) return DECLINED;
+
+    void* stored = NULL;
+    for (request_rec* owner = request; owner && !stored; owner = owner->prev)
+        apr_pool_userdata_get(&stored, OTEL_PROPAGATION_KEY, owner->pool);
+    if (!stored && request->main)
+        apr_pool_userdata_get(&stored, OTEL_PROPAGATION_KEY, request->main->pool);
+    if (!stored) return DECLINED; // No traced interaction: preserve pass-through.
+
+    const apr_table_t* authoritative = static_cast<const apr_table_t*>(stored);
+    const char* before = apr_table_get(request->headers_in, "traceparent");
+    const char* expected = apr_table_get(authoritative, "traceparent");
+    if ((before || expected) && (!before || !expected || strcmp(before, expected)))
+        ApacheTracing::writeTrace(request->server, __func__,
+            "restoring changed proxy traceparent: before=%s expected=%s",
+            before ? before : "", expected ? expected : "");
+    clearTraceHeaders(request);
+    const apr_array_header_t* entries = apr_table_elts(authoritative);
+    const apr_table_entry_t* table = reinterpret_cast<const apr_table_entry_t*>(entries->elts);
+    for (int i = 0; i < entries->nelts; ++i)
+        if (table[i].key && table[i].val)
+            apr_table_set(request->headers_in, table[i].key, table[i].val);
+
+    const char* parent = apr_table_get(request->headers_in, "traceparent");
+    const char* state = apr_table_get(request->headers_in, "tracestate");
+    ApacheTracing::writeTrace(request->server, __func__,
+        "proxy egress context: target=%s traceparent=%s tracestate=%s",
+        request->filename ? request->filename : "",
+        parent ? parent : "", state ? state : "");
+    return OK;
 }
 
 // Utility routine for initializing the SDK based on configuration parameters

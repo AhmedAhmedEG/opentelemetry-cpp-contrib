@@ -68,6 +68,13 @@ switch disables local spans. Both switches accept only ON/OFF and inherit into
 directory/location configurations. No custom parent-span header is generated
 by Apache.
 
+For HTTP(S) proxy requests, Apache reasserts the intended client context at
+mod_proxy's final header step, after earlier proxy hooks. With `TraceAsError ON`,
+the Apache error log includes `proxy egress context` and any changed
+`traceparent` it restored. These entries show headers immediately before proxy
+serialization; an agent intercepting the network/TLS write can still change
+them afterward. Avoid competing APM tools owning the same outgoing context.
+
 For a proxy backend such as Kong, outgoing `traceparent` identifies an Apache
 client span. The supplied example uses Extract OFF and Inject ON: Apache starts
 a new trace and the backend can become its child. With Extract ON instead,

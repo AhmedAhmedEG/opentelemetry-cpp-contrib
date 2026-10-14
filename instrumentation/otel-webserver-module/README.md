@@ -93,6 +93,12 @@ trace ID and its client span's ID. Captured request header attributes still
 record the incoming context; compare the top-level span `trace_id`, rather than
 the captured header, when checking propagation.
 
+HTTP(S) proxy headers are reasserted at mod_proxy's final header step. Apache's
+error log records `proxy egress context` (traceparent/tracestate) and reports
+restored changes when `ApacheModuleTraceAsError ON` is used. This identifies
+changes before proxy serialization; another agent intercepting network/TLS
+writes can still change headers later.
+
 #### Separate request and response header attributes
 
 Use these independent directives to move selected headers out of the combined

@@ -46,6 +46,7 @@ private:
     static bool initialize_opentelemetry(const request_rec *r);
     static int otel_hook_header_parser_begin(request_rec *r);
     static int otel_hook_log_transaction_end(request_rec *r);
+    static int otel_proxy_fixups(request_rec *r);
 
     // Callback to start an Interaction
 
