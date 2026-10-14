@@ -43,14 +43,18 @@ Monitoring individual modules is crucial to the instrumentation of Apache web se
 | Configuration Directives                       |  Default Values |  Remarks                                   |
 | ---------------------------------------------- | --------------- | ------------------------------------------ |
 |*ApacheModuleEnabled*                           | ON              | OPTIONAL: Needed for instrumenting Apache Webserver |
-|*ApacheModuleOtelSpanExporter*                 | otlp             | OPTIONAL: Specify the span exporter to be used. Supported values are "otlp" and "ostream". All other supported values would be added in future. |
-|*ApacheModuleOtelExporterEndpoint:*             |                 | REQUIRED: The endpoint otel exporter exports to. Example "docker.for.mac.localhost:4317" |
+|*ApacheModuleOtelSpanExporter*                 | otlp             | OPTIONAL: `otlp` or `osstream` (console). |
+|*ApacheModuleOtelExporterEndpoint*              |                 | REQUIRED: Collector `host:4317`. |
 |*ApacheModuleOtelSpanProcessor*                 | batch           | OPTIONAL: Specify the processor to select to. Supported values are "simple" and "batch".|
-|*ApacheModuleOtelSampler*                       | AlwaysOn        | OPTIONAL: Supported values are "AlwaysOn" and "AlwaysOff" |
-|*ApacheModuleOtelMaxQueueSize*                  | 2048            | OPTIONAL: The maximum queue size. After the size is reached spans are dropped|
-|*ApacheModuleOtelScheduledDelayMillis*          | 5000            | OPTIONAL: The delay interval in milliseconds between two consecutive exports|
-|*ApacheModuleOtelExportTimeoutMillis*           | 30000           | OPTIONAL: How long the export can run in milliseconds before it is cancelled|
-|*ApacheModuleOtelMaxExportBatchSize*            | 512             | OPTIONAL: The maximum batch size of every export. It must be smaller or equal to maxQueueSize |
+|*ApacheModuleOtelSampler*                       | always_on       | OPTIONAL: `always_on` or `always_off`. |
+|*ApacheModuleOtelPropagatorType*                 | w3c             | OPTIONAL: `w3c`, `b3`, `w3c,b3`, or `b3,w3c`. |
+|*ApacheModuleOtelPropagatorExtract*              | ON              | OPTIONAL: Accept incoming context as the server-span parent. OFF starts a new trace. |
+|*ApacheModuleOtelPropagatorInject*               | ON              | OPTIONAL: Write current context to outgoing request headers. OFF preserves incoming headers; it does not strip them. |
+|*ApacheModuleTraceRoutes*                       | empty           | OPTIONAL: Comma-separated paths and all descendants. Trailing slashes accepted; omit or use `/` for all routes. |
+|*ApacheModuleOtelMaxQueueSize*                  | 2048            | Accepted; overrides currently not applied (SDK defaults used). |
+|*ApacheModuleOtelScheduledDelayMillis*          | 5000            | Accepted; overrides currently not applied. |
+|*ApacheModuleOtelExportTimeoutMillis*           | 30000           | Accepted; overrides currently not applied. |
+|*ApacheModuleOtelMaxExportBatchSize*            | 512             | Accepted; overrides currently not applied. |
 |*ApacheModuleServiceName*                       |                 | REQUIRED: Logical name of the service |
 |*ApacheModuleServiceNamespace*                  |                 | REQUIRED: A namespace for the ServiceName |
 |*ApacheModuleServiceInstanceId*                 |                 | REQUIRED: The string ID of the service instance |
@@ -60,7 +64,21 @@ Monitoring individual modules is crucial to the instrumentation of Apache web se
 |*ApacheModuleSegmentParameter*                  |                 | OPTIONAL: Specify the segment count or segment numbers that you want to display for Span Creation|
 |*ApacheModuleOtelExporterHeaders*               |                 | OPTIONAL: OTEL Exporter header info or Metadata like API key for OTLP endpoint. a list of key value pairs, and these are expected to be represented in a format matching to the W3C Correlation-Context, except that additional semi-colon delimited metadata is not supported, i.e.: key1=value1,key2=value2. |
 
-A sample configuration is mentioned in [opentelemetry_module.conf](https://github.com/open-telemetry/opentelemetry-cpp-contrib/blob/main/instrumentation/otel-webserver-module/opentelemetry_module.conf)
+See [opentelemetry_module.conf](opentelemetry_module.conf) for the complete example
+and [README-apache.md](README-apache.md) for all 37 Apache directives. The archive
+ships the quick reference as `README.md` and the example under `conf/`.
+
+The example traces `/services`, `/auth`, and `/checkSeamless`, including every
+descendant (for example `/services/a/b`, but not `/services-other`). Matching is
+case-sensitive and ignores query strings. Lists replace inherited lists.
+
+Propagation switches are independent of header capture and do not disable local
+spans. The example selects W3C only, with Extract OFF and Inject ON: Apache
+ignores incoming trace context, starts its own trace, and injects its client-span
+context toward the backend. Inject OFF stops
+the module from overwriting headers; Apache can still forward an incoming
+`traceparent` to a proxy backend. Inject ON generates only the configured standard
+headers, without a custom parent-span header; unrelated incoming headers remain.
 
 #### Separate request and response header attributes
 

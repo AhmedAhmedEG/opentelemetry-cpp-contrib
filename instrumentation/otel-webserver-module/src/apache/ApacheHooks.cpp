@@ -307,6 +307,8 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
 
     for (auto itr = propagationHeaders.begin(); itr != propagationHeaders.end(); itr++)
     {
+        // This is SDK metadata for the legacy NGINX adapter, not an HTTP header.
+        if (itr->first == "Parent_Span_Id") continue;
         // put the correlation information into the http headers
         apr_table_set(request->headers_in, itr->first.c_str(), itr->second.c_str());
 
@@ -760,8 +762,9 @@ bool routeIsTraceable(const char* path, const char* routes)
             route.erase(route.begin());
         while (!route.empty() && std::isspace(static_cast<unsigned char>(route.back())))
             route.pop_back();
+        while (route.size() > 1 && route.back() == '/') route.pop_back();
         if (!route.empty() &&
-            (requestPath == route ||
+            (route == "/" || requestPath == route ||
              (requestPath.size() > route.size() &&
               requestPath.compare(0, route.size(), route) == 0 &&
               requestPath[route.size()] == '/')))
@@ -801,6 +804,14 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
             if (extractPropagation)
             {
                 payload->set_http_headers(lowerName, value);
+                // SDK 1.2's B3 propagator looks up these mixed-case keys.
+                // Apache HTTP header names are case-insensitive.
+                if (lowerName == "x-b3-traceid")
+                    payload->set_http_headers("X-B3-TraceId", value);
+                else if (lowerName == "x-b3-spanid")
+                    payload->set_http_headers("X-B3-SpanId", value);
+                else if (lowerName == "x-b3-sampled")
+                    payload->set_http_headers("X-B3-Sampled", value);
             }
             if (captureHeaders && !separateHeaders.count(lowerName))
             {

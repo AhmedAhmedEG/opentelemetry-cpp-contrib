@@ -180,6 +180,8 @@ const char* ApacheConfigHandlers::otel_set_otelPropagatorType(cmd_parms *cmd, vo
 
 const char* ApacheConfigHandlers::otel_set_otelPropagatorExtract(cmd_parms *cmd, void *conf, const char *arg)
 {
+    if (strcasecmp(arg, "on") && strcasecmp(arg, "off"))
+        return "ApacheModuleOtelPropagatorExtract must be ON or OFF";
     otel_cfg* cfg = (otel_cfg*) conf;
     return helperInt(cmd, cfg, arg, cfg->otelPropagatorExtract,
         cfg->otelPropagatorExtract_initialized, "otel_set_otelPropagatorExtract");
@@ -187,6 +189,8 @@ const char* ApacheConfigHandlers::otel_set_otelPropagatorExtract(cmd_parms *cmd,
 
 const char* ApacheConfigHandlers::otel_set_otelPropagatorInject(cmd_parms *cmd, void *conf, const char *arg)
 {
+    if (strcasecmp(arg, "on") && strcasecmp(arg, "off"))
+        return "ApacheModuleOtelPropagatorInject must be ON or OFF";
     otel_cfg* cfg = (otel_cfg*) conf;
     return helperInt(cmd, cfg, arg, cfg->otelPropagatorInject,
         cfg->otelPropagatorInject_initialized, "otel_set_otelPropagatorInject");

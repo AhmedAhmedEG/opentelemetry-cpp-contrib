@@ -295,6 +295,8 @@ TEST(TestRequestProcessingEngine, StartInteraction)
 	WillOnce(Return(span));
 
 	// call to populatePropagationHeader of sdkWrapper
+	EXPECT_CALL(*sdkWrapper, ReturnCurrentSpanId()).
+	WillOnce(Return("0123456789abcdef"));
 	EXPECT_CALL(*sdkWrapper, PopulatePropagationHeaders(propagationHeaders)).
 	Times(1);
 
@@ -307,6 +309,7 @@ TEST(TestRequestProcessingEngine, StartInteraction)
 
 	// Interaction will be added in requestContext
 	EXPECT_TRUE(rContext->hasActiveInteraction());
+	EXPECT_EQ(propagationHeaders["Parent_Span_Id"], "0123456789abcdef");
 }
 
 TEST(TestRequestProcessingEngine, StartInteractionInvalidParams)
