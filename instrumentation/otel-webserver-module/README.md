@@ -86,6 +86,11 @@ when no backend status exists. The old `http.upstream.response_time` attribute
 is removed; use span duration. Proxy target attributes copy Apache's actual
 target URL rather than assembling another URL from path fragments.
 
+With extraction OFF, the outgoing `traceparent` uses the main Apache span's new
+trace ID and its client span's ID. Captured request header attributes still
+record the incoming context; compare the top-level span `trace_id`, rather than
+the captured header, when checking propagation.
+
 #### Separate request and response header attributes
 
 Use these independent directives to move selected headers out of the combined

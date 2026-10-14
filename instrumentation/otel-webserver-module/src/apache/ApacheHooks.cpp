@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <vector>
 #include <string>
 #include <unordered_set>
@@ -322,6 +323,12 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
 // Utility routine for initializing the SDK based on configuration parameters
 bool ApacheHooks::initialize_opentelemetry(const request_rec *r)
 {
+    // Serialize the complete bootstrap, including dependencies, context
+    // registration and process-config publication. WSAgent::init's own lock
+    // covers only part of this sequence; concurrent first requests can
+    // otherwise fail initialization and skip tracing/injection.
+    static std::mutex initializationMutex;
+    std::lock_guard<std::mutex> initializationLock(initializationMutex);
     // check to see if we have already been initialized by getting user data from the process pool
     void* config_data = NULL;
     apr_pool_userdata_get(&config_data, OTEL_CONFIG_KEY, r->server->process->pool);

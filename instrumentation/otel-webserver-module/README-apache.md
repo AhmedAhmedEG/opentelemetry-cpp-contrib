@@ -72,6 +72,10 @@ a new trace and the backend can become its child. With Extract ON instead,
 that client span belongs to the trace received by
 Apache; the backend should extract it and use its span ID as its parent. The
 custom `Parent_Span_Id` field is not part of W3C propagation.
+With extraction OFF, Apache's main span and outgoing `traceparent` share the
+new trace ID; the outgoing span ID identifies its client span. Captured request
+header attributes still show the original incoming `traceparent`, which can
+have a different trace ID. Compare the main span's top-level `trace_id`.
 
 Header lists match case-insensitively; quote lists containing spaces. Listed
 headers move out of the combined JSON into `http.request.headers.<lowercase>`

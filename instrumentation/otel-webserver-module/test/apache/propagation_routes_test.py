@@ -6,6 +6,7 @@ Requires mod_proxy_http, curl, Python and the unbuffered osstream exporter.
 Restores the original configuration; the fixture backend dies on restart.
 """
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
 import subprocess
@@ -185,6 +186,44 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         assert received_path.startswith("//dxl/poq/stuff?"), received_path
         assert "http.upstream.target: http://127.0.0.1:8765" + received_path in logs
         print("PASS: mismatched ProxyPass slashes reproduce // on the wire (telemetry faithfully reports it)")
+
+        # Cold-start concurrency: one process and batch export keep console
+        # records readable while many request threads initialize the SDK.
+        base = base.replace("ApacheModuleOtelSpanProcessor simple", "ApacheModuleOtelSpanProcessor batch")
+        apply("\nApacheModuleTraceRoutes /services\nApacheModuleOtelPropagatorType w3c\n"
+              "ApacheModuleOtelPropagatorExtract OFF\nApacheModuleOtelPropagatorInject ON\n"
+              "ServerLimit 1\nStartServers 1\nMinSpareThreads 1\nMaxSpareThreads 64\n"
+              "ThreadsPerChild 64\nMaxRequestWorkers 64\n")
+        since = docker("exec", CONTAINER, "date", "-u", "+%Y-%m-%dT%H:%M:%S.%NZ").strip()
+        markers = [uuid.uuid4().hex for _ in range(32)]
+        def send(marker):
+            output = docker("exec", CONTAINER, "curl", "-fsS", "-H", "traceparent: " + INCOMING,
+                            "http://localhost/services/echo?race=" + marker)
+            pairs = {key.lower(): value for key, value in json.loads(output)}
+            return marker, pairs["traceparent"]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            responses = list(executor.map(send, markers))
+        for _ in range(100):
+            logs = docker("logs", "--since", since, CONTAINER)
+            if all("http.target: /services/echo?race=" + marker in logs for marker in markers):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Missing concurrent root spans")
+        blocks = logs.split("{\n  name")[1:]
+        records = span_records(logs)
+        trace_ids = set()
+        for marker, wire in responses:
+            block = next(block for block in blocks if "http.target: /services/echo?race=" + marker in block)
+            root = dict(re.findall(r"(?m)^\s*(trace_id|span_id|parent_span_id|span kind)\s*:\s*(\S+)", block))
+            _, trace_id, span_id, _ = wire.split("-")
+            client = next(span for span in records if span["span_id"] == span_id)
+            assert root["span kind"] == "Server" and root["trace_id"] == trace_id == client["trace_id"]
+            assert client["parent_span_id"] == root["span_id"]
+            assert root["parent_span_id"] == "0000000000000000" and trace_id != INCOMING.split("-")[1]
+            trace_ids.add(trace_id)
+        assert len(trace_ids) == len(markers)
+        print("PASS: 32 concurrent cold-start requests; outgoing trace IDs match their Apache main spans")
     finally:
         config_file.write_text(original, encoding="utf-8")
         docker("cp", str(config_file), CONTAINER + ":" + CONFIG)
