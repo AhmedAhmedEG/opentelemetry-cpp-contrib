@@ -78,8 +78,10 @@ spans. The example selects W3C only, with Extract OFF and Inject ON: Apache
 ignores incoming trace context, starts its own trace, and injects its client-span
 context toward the backend. Inject OFF stops
 the module from overwriting headers; Apache can still forward an incoming
-`traceparent` to a proxy backend. Inject ON generates only the configured standard
-headers, without a custom parent-span header; unrelated incoming headers remain.
+`traceparent` to a proxy backend. Inject ON replaces incoming W3C/B3 context
+headers with the configured propagator's current context, removing stale
+`tracestate` and alternate propagation formats. Ordinary application headers
+remain. Apache generates no custom parent-span header.
 
 `http.upstream.status` reads mod_proxy_http's `proxy-status` note and is omitted
 when no backend status exists. The old `http.upstream.response_time` attribute
@@ -104,8 +106,9 @@ ApacheModuleSeparateResponseHeaders Set-Cookie,X-Response-ID
 The example produces `http.request.headers.authorization`,
 `http.request.headers.x-request-id`, `http.response.headers.set-cookie`, and
 `http.response.headers.x-response-id`. These headers are excluded from the
-combined JSON; selected request headers are also excluded from the older
-`http.request.header.<original-name>` attributes.
+combined JSON. Only headers selected by these directives get their own header
+attributes. Other captured headers remain solely in the combined JSON; Apache
+no longer emits legacy `http.request.header.<original-name>` attributes.
 
 Lists are comma-separated, case-insensitive, and ignore surrounding whitespace
 and duplicate names. Quote the argument when it contains spaces. Attribute

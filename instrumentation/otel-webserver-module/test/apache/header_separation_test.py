@@ -79,6 +79,7 @@ def apply_and_request(config, path="/services/index.html", expected_status="200"
         time.sleep(0.1)
         logs = docker("logs", "--since", since, CONTAINER)
         if "http.target: " + target in logs:
+            assert not re.search(r"(?m)^\s*http\.(request|response)\.header\.", logs), "Unexpected legacy per-header attributes"
             return logs
     raise AssertionError("Request span was not exported")
 
@@ -90,6 +91,8 @@ def check_selected(logs):
     assert request["x-keep-request"] == "keep-request"
     assert "set-cookie" not in response and "x-response-id" not in response
     assert response["x-keep-response"] == "keep-response"
+    assert attribute(logs, "http.request.headers.x-keep-request") is None
+    assert attribute(logs, "http.response.headers.x-keep-response") is None
     assert attribute(logs, "http.request.headers.authorization") == "Bearer fixture-token"
     assert attribute(logs, "http.request.headers.x-request-id") == "request-id"
     assert attribute(logs, "http.response.headers.x-response-id") == "response-id"
@@ -112,6 +115,7 @@ with tempfile.TemporaryDirectory(prefix="otel-header-test-") as directory:
         assert attribute(logs, "http.response.headers.set-cookie") is None
         assert attribute(logs, "http.response.headers.x-response-id") is None
         assert "set-cookie" in combined(logs, "response")
+        assert not re.search(r"(?m)^\s*http\.(request|response)\.headers\.[^:]+:", logs)
         print("PASS: both lists default to empty; Authorization stays in combined JSON")
 
         logs = apply_and_request(base + fixtures + """
@@ -123,6 +127,8 @@ ApacheModuleSeparateResponseHeaders X-Response-ID
         assert attribute(logs, "http.request.headers.x-request-id") == "request-id"
         assert "set-cookie" in combined(logs, "response")
         assert attribute(logs, "http.response.headers.x-response-id") == "response-id"
+        selected = set(re.findall(r"(?m)^\s*(http\.(?:request|response)\.headers\.[^:]+):", logs))
+        assert selected == {"http.request.headers.x-request-id", "http.response.headers.x-response-id"}, selected
         print("PASS: explicit lists replace defaults independently")
 
         check_selected(apply_and_request(base + fixtures + selection))

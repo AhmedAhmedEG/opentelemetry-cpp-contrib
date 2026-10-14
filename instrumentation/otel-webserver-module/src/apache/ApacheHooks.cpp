@@ -306,6 +306,16 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
         return;
     }
 
+    // Replace the complete wire context. A freshly generated trace often has
+    // no tracestate, so merely setting returned fields leaves stale input
+    // state behind. Also remove alternate formats the backend might prefer.
+    for (const char* header : {"traceparent", "tracestate", "b3",
+            "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "X-B3-Flags",
+            "X-B3-ParentSpanId", "Parent_Span_Id"})
+    {
+        apr_table_unset(request->headers_in, header);
+    }
+
     for (auto itr = propagationHeaders.begin(); itr != propagationHeaders.end(); itr++)
     {
         // This is SDK metadata for the legacy NGINX adapter, not an HTTP header.
@@ -820,13 +830,11 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
                 else if (lowerName == "x-b3-sampled")
                     payload->set_http_headers("X-B3-Sampled", value);
             }
-            if (captureHeaders && !separateHeaders.count(lowerName))
-            {
-                payload->set_request_headers(name, value);
-            }
         }
         if (captureHeaders)
         {
+            // Only the configured separation list creates per-header attrs.
+            // Leave the legacy request_headers map empty for Apache.
             payload->set_request_attribute("http.request.headers",
                 headersAsJson(request->headers_in, separateHeaders));
             for (const auto& attribute : separatedHeaderAttributes(

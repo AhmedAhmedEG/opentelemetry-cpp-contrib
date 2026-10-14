@@ -60,8 +60,10 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 Propagation extraction and injection are independent of header capture and of
 each other. Extract OFF starts a new trace; Inject OFF leaves incoming headers
 unchanged, so Apache may still forward them to a proxy backend. It does not
-strip them. Inject ON generates only the selected standard headers; unrelated
-incoming headers (including B3 headers in W3C mode) are not removed. Neither
+strip them. Inject ON replaces incoming W3C/B3 trace-context headers with the
+selected propagator's current context. Stale `tracestate` and alternate formats
+are removed; ordinary application headers remain. With Extract OFF / Inject ON,
+only Apache's new trace context reaches the backend. Neither
 switch disables local spans. Both switches accept only ON/OFF and inherit into
 directory/location configurations. No custom parent-span header is generated
 by Apache.
@@ -80,9 +82,11 @@ have a different trace ID. Compare the main span's top-level `trace_id`.
 Header lists match case-insensitively; quote lists containing spaces. Listed
 headers move out of the combined JSON into `http.request.headers.<lowercase>`
 or `http.response.headers.<lowercase>`. Repeated values use a JSON array string;
-missing headers produce no attribute. Lists replace inherited lists. Other
-request headers also retain the legacy `http.request.header.<original-name>`
-attributes. Header capture OFF leaves trace propagation active.
+missing headers produce no attribute. Lists replace inherited lists. Only
+listed headers get per-header attributes; other captured headers appear solely
+in the combined JSON. Apache no longer emits legacy
+`http.request.header.<original-name>` attributes. Both lists default to empty.
+Header capture OFF leaves trace propagation active.
 
 Root names are `METHOD /full/path`, excluding the query. HTTP status, URL,
 route, and available upstream attributes need no extra directive.

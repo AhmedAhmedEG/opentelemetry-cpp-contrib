@@ -100,8 +100,15 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                   "ApacheModuleOtelPropagatorExtract " + ("ON" if extract else "OFF") + "\n"
                   "ApacheModuleOtelPropagatorInject " + ("ON" if inject else "OFF") + "\n")
             for incoming in [True, False]:
-                response, spans, logs = request(headers=["TrAcEpArEnT: " + INCOMING] if incoming else [])
+                response, spans, logs = request(headers=["X-Keep-Request: fixture"] + ([
+                    "TrAcEpArEnT: " + INCOMING, "TrAcEsTaTe: vendor=fixture",
+                    "X-B3-TraceId: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "X-B3-SpanId: bbbbbbbbbbbbbbbb", "X-B3-Sampled: 1",
+                    "X-B3-Flags: 1", "X-B3-ParentSpanId: cccccccccccccccc",
+                    "b3: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-1",
+                ] if incoming else []))
                 pairs = [(key.lower(), value) for key, value in json.loads(response)]
+                assert ("x-keep-request", "fixture") in pairs, pairs
                 parents = [value for key, value in pairs if key == "traceparent"]
                 assert not any(key == "parent_span_id" for key, _ in pairs), pairs
                 root = next(span for span in spans if span["span kind"] == "Server")
@@ -113,6 +120,9 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 else:
                     assert root["trace_id"] != "11111111111111111111111111111111", root
                 if inject:
+                    assert not any(key == "b3" or key.startswith("x-b3-") for key, _ in pairs), pairs
+                    states = [value for key, value in pairs if key == "tracestate"]
+                    assert states == (["vendor=fixture"] if extract and incoming else []), pairs
                     assert len(parents) == 1 and re.fullmatch(r"00-[0-9a-f]{32}-[0-9a-f]{16}-01", parents[0]), pairs
                     _, trace_id, span_id, _ = parents[0].split("-")
                     parent = next(span for span in spans if span["span_id"] == span_id)
@@ -120,11 +130,16 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                     assert parent["span kind"] == "Client" and parent["parent_span_id"] == root["span_id"], parent
                 else:
                     assert parents == ([INCOMING] if incoming else []), pairs
+                    assert [value for key, value in pairs if key == "tracestate"] == (["vendor=fixture"] if incoming else []), pairs
+                    assert any(key == "x-b3-traceid" for key, _ in pairs) == incoming, pairs
             print("PASS: proxy wire parent and extraction/injection " + str((extract, inject)))
 
         apply("\nApacheModuleTraceRoutes /services\nApacheModuleOtelPropagatorType b3\n")
-        _, spans, _ = request(headers=["x-b3-traceid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                      "X-B3-sPaNiD: bbbbbbbbbbbbbbbb", "x-b3-sampled: 1"])
+        response, spans, _ = request(headers=["x-b3-traceid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                      "X-B3-sPaNiD: bbbbbbbbbbbbbbbb", "x-b3-sampled: 1",
+                                      "traceparent: " + INCOMING, "tracestate: vendor=fixture"])
+        pairs = {key.lower(): value for key, value in json.loads(response)}
+        assert "traceparent" not in pairs and "tracestate" not in pairs
         root = next(span for span in spans if span["span kind"] == "Server")
         assert root["trace_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and root["parent_span_id"] == "bbbbbbbbbbbbbbbb", root
         print("PASS: mixed-case B3 extraction remains supported")
