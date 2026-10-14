@@ -17,6 +17,9 @@
 #include "sdkwrapper/ServerSpan.h"
 #include "sdkwrapper/ScopedSpan.h"
 #include "sdkwrapper/SdkUtils.h"
+#include "sdkwrapper/SdkConstants.h"
+#include "sdkwrapper/RootTraceIdGenerator.h"
+#include <opentelemetry/trace/context.h>
 namespace otel {
 namespace core {
 namespace sdkwrapper {
@@ -29,13 +32,23 @@ ServerSpan::ServerSpan(const std::string& name,
 	mLogger(logger)
 {
 	// Extract W3C Trace Context. And store the token in local variable.
-	context::Context ctx = context::RuntimeContext::GetCurrent();
+    const bool ownRoot = carrier.find(kRootTraceCarrierKey) != carrier.end();
+	context::Context ctx = ownRoot ? context::Context() : context::RuntimeContext::GetCurrent();
 	OtelCarrier otelCarrier(carrier);
 	for (auto &propagator : sdkHelperFactory->GetPropagators()) {
 		ctx = propagator->Extract(otelCarrier, ctx);
 	}
+    trace::TraceId reusedTraceId;
+    if (ownRoot)
+    {
+        const auto incoming = trace::GetSpan(ctx)->GetContext();
+        if (incoming.IsValid()) reusedTraceId = incoming.trace_id();
+        // Keep only the valid trace ID; never attach the received parent or
+        // vendor tracestate to this root. Normal local sampling still applies.
+        ctx = context::Context();
+    }
 	mToken = context::RuntimeContext::Attach(ctx);
-
+    RootTraceIdScope traceIdOverride(reusedTraceId);
 	mScopedSpan.reset(
 		new ScopedSpan(name,
 			trace::SpanKind::kServer,

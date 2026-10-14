@@ -11,7 +11,8 @@ Include /opt/opentelemetry-webserver-sdk/conf/opentelemetry_module.conf
 Run your JBCS `httpd -t`, then restart its service. Load the module only once.
 The supplied configuration uses generic example service identities, enables
 the additions, traces all routes, uses
-**W3C only**, ignores incoming trace context, injects Apache's new context toward
+**W3C only**, starts Apache as a root using any valid incoming trace ID, injects
+Apache's own span context toward
 the backend, and separates **Authorization only** from request headers JSON.
 
 Every directive below has the prefix **`ApacheModule`**. Example:
@@ -32,7 +33,7 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `OtelSpanProcessor` | `batch` or `simple`. |
 | `OtelSampler` | `always_on` or `always_off`; other samplers are unimplemented. |
 | `OtelPropagatorType` | `w3c`, `b3` (multi-header), `w3c,b3`, or `b3,w3c`. |
-| `OtelPropagatorExtract` | `ON` / `OFF`: accept incoming propagation headers as the server-span parent. Default `ON`. |
+| `OtelPropagatorExtract` | `ON`: adopt incoming parent. `OFF`: reuse a valid incoming trace ID as a root, with no parent; otherwise generate an ID. Default `ON`. |
 | `OtelPropagatorInject` | `ON` / `OFF`: write the current client-span context to outgoing propagation headers. Default `ON`; OFF preserves incoming headers. |
 | `OtelMaxQueueSize` | Integer; accepted but not applied in this version. |
 | `OtelScheduledDelayMillis` | Milliseconds; accepted but not applied. |
@@ -58,12 +59,14 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `Matchpattern` | URL filter pattern; currently unused. |
 
 Propagation extraction and injection are independent of header capture and of
-each other. Extract OFF starts a new trace; Inject OFF leaves incoming headers
+each other. Extract OFF reuses a valid trace ID from the configured propagator
+without adopting its parent span, sampling flags or vendor tracestate. With no
+valid incoming context it generates an ID normally. Inject OFF leaves incoming headers
 unchanged, so Apache may still forward them to a proxy backend. It does not
 strip them. Inject ON replaces incoming W3C/B3 trace-context headers with the
 selected propagator's current context. Stale `tracestate` and alternate formats
 are removed; ordinary application headers remain. With Extract OFF / Inject ON,
-only Apache's new trace context reaches the backend. Neither
+only Apache's own span context reaches the backend. Neither
 switch disables local spans. Both switches accept only ON/OFF and inherit into
 directory/location configurations. No custom parent-span header is generated
 by Apache.
@@ -77,14 +80,17 @@ them afterward. Avoid competing APM tools owning the same outgoing context.
 
 For a proxy backend such as Kong, outgoing `traceparent` identifies an Apache
 client span. The supplied example uses Extract OFF and Inject ON: Apache starts
-a new trace and the backend can become its child. With Extract ON instead,
+a root span with the incoming trace ID (or generates one) and the backend can
+become its child. With Extract ON instead,
 that client span belongs to the trace received by
 Apache; the backend should extract it and use its span ID as its parent. The
 custom `Parent_Span_Id` field is not part of W3C propagation.
 With extraction OFF, Apache's main span and outgoing `traceparent` share the
-new trace ID; the outgoing span ID identifies its client span. Captured request
-header attributes still show the original incoming `traceparent`, which can
-have a different trace ID. Compare the main span's top-level `trace_id`.
+trace ID; the outgoing span ID identifies its client span. The Apache root has
+`parent_span_id=0000000000000000` and its own new span ID. Captured request
+header attributes still show the incoming parent's span ID. Other roots already
+exported by Dynatrace can coexist in that trace; this does not replace them or
+make Apache the sole trace owner in Grafana.
 
 Header lists match case-insensitively; quote lists containing spaces. Listed
 headers move out of the combined JSON into `http.request.headers.<lowercase>`

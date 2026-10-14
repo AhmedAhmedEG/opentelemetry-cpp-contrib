@@ -16,6 +16,7 @@
 
 #include "sdkwrapper/SdkHelperFactory.h"
 #include "sdkwrapper/SdkConstants.h"
+#include "sdkwrapper/RootTraceIdGenerator.h"
 #include "opentelemetry/sdk/trace/batch_span_processor.h"
 #include "opentelemetry/sdk/trace/simple_processor.h"
 #include "opentelemetry/sdk/trace/tracer_provider.h"
@@ -90,7 +91,8 @@ SdkHelperFactory::SdkHelperFactory(
       new opentelemetry::sdk::trace::TracerProvider(
             std::move(processor),
             opentelemetry::sdk::resource::Resource::Create(attributes),
-            std::move(sampler)
+            std::move(sampler),
+            std::unique_ptr<opentelemetry::sdk::trace::IdGenerator>(new RootTraceIdGenerator)
             ));
 
     mTracer = mTracerProvider->GetTracer("cpp", cppSDKVersion);

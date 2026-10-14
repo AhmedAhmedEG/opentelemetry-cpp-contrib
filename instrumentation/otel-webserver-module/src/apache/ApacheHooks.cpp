@@ -857,7 +857,9 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     const bool captureQuery = !cfg || cfg->getCaptureQueryParameters();
     const auto separateHeaders = separateHeaderNames(cfg ? cfg->getSeparateRequestHeaders() : "");
 
-    // Keep inbound headers available for attributes and optionally for propagation.
+    // Both modes parse valid context; OFF reuses only its trace ID as a root.
+    if (!extractPropagation)
+        payload->set_http_headers(kRootTraceCarrierKey, "1");
     if (request->headers_in)
     {
         const apr_array_header_t* entries = apr_table_elts(request->headers_in);
@@ -869,18 +871,15 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
             std::string lowerName = name;
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (extractPropagation)
-            {
-                payload->set_http_headers(lowerName, value);
-                // SDK 1.2's B3 propagator looks up these mixed-case keys.
-                // Apache HTTP header names are case-insensitive.
-                if (lowerName == "x-b3-traceid")
-                    payload->set_http_headers("X-B3-TraceId", value);
-                else if (lowerName == "x-b3-spanid")
-                    payload->set_http_headers("X-B3-SpanId", value);
-                else if (lowerName == "x-b3-sampled")
-                    payload->set_http_headers("X-B3-Sampled", value);
-            }
+            payload->set_http_headers(lowerName, value);
+            // SDK 1.2's B3 propagator looks up these mixed-case keys.
+            // Apache HTTP header names are case-insensitive.
+            if (lowerName == "x-b3-traceid")
+                payload->set_http_headers("X-B3-TraceId", value);
+            else if (lowerName == "x-b3-spanid")
+                payload->set_http_headers("X-B3-SpanId", value);
+            else if (lowerName == "x-b3-sampled")
+                payload->set_http_headers("X-B3-Sampled", value);
         }
         if (captureHeaders)
         {

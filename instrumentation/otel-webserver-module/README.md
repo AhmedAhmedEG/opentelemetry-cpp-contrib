@@ -48,7 +48,7 @@ Monitoring individual modules is crucial to the instrumentation of Apache web se
 |*ApacheModuleOtelSpanProcessor*                 | batch           | OPTIONAL: Specify the processor to select to. Supported values are "simple" and "batch".|
 |*ApacheModuleOtelSampler*                       | always_on       | OPTIONAL: `always_on` or `always_off`. |
 |*ApacheModuleOtelPropagatorType*                 | w3c             | OPTIONAL: `w3c`, `b3`, `w3c,b3`, or `b3,w3c`. |
-|*ApacheModuleOtelPropagatorExtract*              | ON              | OPTIONAL: Accept incoming context as the server-span parent. OFF starts a new trace. |
+|*ApacheModuleOtelPropagatorExtract*              | ON              | ON adopts the incoming parent. OFF reuses a valid incoming trace ID as a root with no parent; absent/invalid context generates an ID. |
 |*ApacheModuleOtelPropagatorInject*               | ON              | OPTIONAL: Write current context to outgoing request headers. OFF preserves incoming headers; it does not strip them. |
 |*ApacheModuleTraceRoutes*                       | empty           | OPTIONAL: Comma-separated paths and all descendants. Trailing slashes accepted; omit or use `/` for all routes. |
 |*ApacheModuleOtelMaxQueueSize*                  | 2048            | Accepted; overrides currently not applied (SDK defaults used). |
@@ -75,7 +75,8 @@ query strings. Trailing slashes are accepted. Lists replace inherited lists.
 
 Propagation switches are independent of header capture and do not disable local
 spans. The example selects W3C only, with Extract OFF and Inject ON: Apache
-ignores incoming trace context, starts its own trace, and injects its client-span
+reuses a valid incoming trace ID, creates its own root with no incoming parent,
+and injects its client-span
 context toward the backend. Inject OFF stops
 the module from overwriting headers; Apache can still forward an incoming
 `traceparent` to a proxy backend. Inject ON replaces incoming W3C/B3 context
@@ -88,10 +89,12 @@ when no backend status exists. The old `http.upstream.response_time` attribute
 is removed; use span duration. Proxy target attributes copy Apache's actual
 target URL rather than assembling another URL from path fragments.
 
-With extraction OFF, the outgoing `traceparent` uses the main Apache span's new
-trace ID and its client span's ID. Captured request header attributes still
-record the incoming context; compare the top-level span `trace_id`, rather than
-the captured header, when checking propagation.
+With extraction OFF, Apache reuses the valid incoming trace ID but creates a
+fresh root span (`parent_span_id=0000000000000000`). Its outgoing `traceparent`
+uses that trace ID and its client span's ID. Incoming parent ID, sampling flags
+and vendor tracestate are not adopted. With absent/invalid context an ID is
+generated normally. Existing roots from other instrumentation can coexist in
+the trace; Apache cannot replace them or guarantee Grafana selects it as owner.
 
 HTTP(S) proxy headers are reasserted at mod_proxy's final header step. Apache's
 error log records `proxy egress context` (traceparent/tracestate) and reports

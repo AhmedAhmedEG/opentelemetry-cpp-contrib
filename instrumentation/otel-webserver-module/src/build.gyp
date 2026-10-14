@@ -29,6 +29,7 @@
       'core/sdkwrapper/SdkHelperFactory.cpp',
       'core/sdkwrapper/ScopedSpan.cpp',
       'core/sdkwrapper/ServerSpan.cpp',
+      'core/sdkwrapper/RootTraceIdGenerator.cpp',
       'core/sdkwrapper/SdkWrapper.cpp',
       'util/SpanNamingUtils.cpp',
       'util/RegexResolver.cpp'

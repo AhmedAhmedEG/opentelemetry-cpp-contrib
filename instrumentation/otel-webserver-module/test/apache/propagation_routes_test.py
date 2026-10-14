@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 assert re.search(r"(?m)^\s*http\.upstream\.status: 200$", logs), logs
                 assert "http.upstream.response_time:" not in logs
                 assert root["parent_span_id"] == ("2222222222222222" if extract and incoming else "0000000000000000"), root
-                if extract and incoming:
+                if incoming:
                     assert root["trace_id"] == "11111111111111111111111111111111", root
                 else:
                     assert root["trace_id"] != "11111111111111111111111111111111", root
@@ -143,6 +143,34 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         root = next(span for span in spans if span["span kind"] == "Server")
         assert root["trace_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and root["parent_span_id"] == "bbbbbbbbbbbbbbbb", root
         print("PASS: mixed-case B3 extraction remains supported")
+
+        apply("\nApacheModuleTraceRoutes /services\nApacheModuleOtelPropagatorType b3\n"
+              "ApacheModuleOtelPropagatorExtract OFF\nApacheModuleOtelPropagatorInject ON\n")
+        response, spans, _ = request(headers=["x-b3-traceid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                              "x-b3-spanid: bbbbbbbbbbbbbbbb", "x-b3-sampled: 1"])
+        root = next(span for span in spans if span["span kind"] == "Server")
+        assert root["trace_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and root["parent_span_id"] == "0000000000000000", root
+        assert root["span_id"] != "bbbbbbbbbbbbbbbb", root
+        print("PASS: B3 OFF reuses trace ID without adopting incoming parent")
+
+        apply("\nApacheModuleTraceRoutes /services\nApacheModuleOtelPropagatorType w3c\n"
+              "ApacheModuleOtelPropagatorExtract OFF\nApacheModuleOtelPropagatorInject ON\n")
+        for context in ["garbage", "00-00000000000000000000000000000000-2222222222222222-01",
+                        "00-11111111111111111111111111111111-0000000000000000-01"]:
+            response, spans, _ = request(headers=["traceparent: " + context])
+            root = next(span for span in spans if span["span kind"] == "Server")
+            assert root["parent_span_id"] == "0000000000000000" and root["trace_id"] != "11111111111111111111111111111111", root
+            wire = dict(json.loads(response))["traceparent"]
+            assert wire.split("-")[1] == root["trace_id"]
+        print("PASS: malformed and invalid W3C context generates a new root trace ID")
+
+        response, spans, _ = request(headers=["traceparent: " + INCOMING[:-2] + "00",
+                                              "tracestate: vendor=fixture"])
+        root = next(span for span in spans if span["span kind"] == "Server")
+        assert root["trace_id"] == "11111111111111111111111111111111" and root["parent_span_id"] == "0000000000000000", root
+        pairs = dict(json.loads(response))
+        assert pairs["traceparent"].endswith("-01") and "tracestate" not in pairs, pairs
+        print("PASS: root reuse keeps local sampling and does not inherit vendor tracestate")
 
         apply("\nApacheModuleTraceRoutes /services/\nApacheModuleOtelPropagatorType w3c\n")
         for path in ["/services", "/services/", "/services/a/b"]:
@@ -212,7 +240,8 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         since = docker("exec", CONTAINER, "date", "-u", "+%Y-%m-%dT%H:%M:%S.%NZ").strip()
         markers = [uuid.uuid4().hex for _ in range(32)]
         def send(marker):
-            output = docker("exec", CONTAINER, "curl", "-fsS", "-H", "traceparent: " + INCOMING,
+            incoming = "00-" + marker + "-2222222222222222-01"
+            output = docker("exec", CONTAINER, "curl", "-fsS", "-H", "traceparent: " + incoming,
                             "http://localhost/services/echo?race=" + marker)
             pairs = {key.lower(): value for key, value in json.loads(output)}
             return marker, pairs["traceparent"]
@@ -235,7 +264,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
             client = next(span for span in records if span["span_id"] == span_id)
             assert root["span kind"] == "Server" and root["trace_id"] == trace_id == client["trace_id"]
             assert client["parent_span_id"] == root["span_id"]
-            assert root["parent_span_id"] == "0000000000000000" and trace_id != INCOMING.split("-")[1]
+            assert root["parent_span_id"] == "0000000000000000" and trace_id == marker
             trace_ids.add(trace_id)
         assert len(trace_ids) == len(markers)
         print("PASS: 32 concurrent cold-start requests; outgoing trace IDs match their Apache main spans")

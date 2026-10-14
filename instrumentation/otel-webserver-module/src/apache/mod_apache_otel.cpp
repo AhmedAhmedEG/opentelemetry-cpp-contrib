@@ -105,7 +105,7 @@ static const command_rec otel_cmds[] =
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_otelPropagatorExtract,
             NULL,
             OR_ALL,
-            "Extract incoming propagation headers (ON or OFF)"),
+            "ON adopts incoming parent; OFF reuses its trace ID as a root (or generates one)"),
     AP_INIT_TAKE1(
             "ApacheModuleOtelPropagatorInject",
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_otelPropagatorInject,

@@ -19,6 +19,10 @@ namespace otel {
 namespace core {
 namespace sdkwrapper {
 
+// Internal carrier control, never an HTTP header or span attribute. HTTP
+// field names cannot contain ':', so callers cannot inject this control.
+constexpr const char* kRootTraceCarrierKey = ":otel-root-trace";
+
 const std::string kServiceName = "service.name";
 const std::string kServiceNamespace = "service.namespace";
 const std::string kServiceInstanceId = "service.instance.id";
