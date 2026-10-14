@@ -68,9 +68,10 @@ See [opentelemetry_module.conf](opentelemetry_module.conf) for the complete exam
 and [README-apache.md](README-apache.md) for all 37 Apache directives. The archive
 ships the quick reference as `README.md` and the example under `conf/`.
 
-The example traces `/services`, `/auth`, and `/checkSeamless`, including every
-descendant (for example `/services/a/b`, but not `/services-other`). Matching is
-case-sensitive and ignores query strings. Lists replace inherited lists.
+The generic example traces all routes. To restrict it, set
+`ApacheModuleTraceRoutes /api`: this includes every descendant (for example
+`/api/items/123`, but not `/api-other`). Matching is case-sensitive and ignores
+query strings. Trailing slashes are accepted. Lists replace inherited lists.
 
 Propagation switches are independent of header capture and do not disable local
 spans. The example selects W3C only, with Extract OFF and Inject ON: Apache
@@ -79,6 +80,11 @@ context toward the backend. Inject OFF stops
 the module from overwriting headers; Apache can still forward an incoming
 `traceparent` to a proxy backend. Inject ON generates only the configured standard
 headers, without a custom parent-span header; unrelated incoming headers remain.
+
+`http.upstream.status` reads mod_proxy_http's `proxy-status` note and is omitted
+when no backend status exists. The old `http.upstream.response_time` attribute
+is removed; use span duration. Proxy target attributes copy Apache's actual
+target URL rather than assembling another URL from path fragments.
 
 #### Separate request and response header attributes
 

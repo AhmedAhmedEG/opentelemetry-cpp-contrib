@@ -9,8 +9,8 @@ Include /opt/opentelemetry-webserver-sdk/conf/opentelemetry_module.conf
 ```
 
 Run your JBCS `httpd -t`, then restart its service. Load the module only once.
-The supplied configuration enables the additions, traces `/services`, `/auth`,
-and `/checkSeamless` plus every descendant, uses
+The supplied configuration uses generic example service identities, enables
+the additions, traces all routes, uses
 **W3C only**, ignores incoming trace context, injects Apache's new context toward
 the backend, and separates **Authorization only** from request headers JSON.
 
@@ -81,6 +81,19 @@ request headers also retain the legacy `http.request.header.<original-name>`
 attributes. Header capture OFF leaves trace propagation active.
 
 Root names are `METHOD /full/path`, excluding the query. HTTP status, URL,
-route, and available upstream attributes need no extra directive. Upstream
-status/timing values depend on Apache request notes/environment supplied by
-other modules; they are not measured by this plugin.
+route, and available upstream attributes need no extra directive.
+`http.upstream.status` uses mod_proxy_http's `proxy-status` note (legacy
+`upstream_status` / `proxy_status` notes or environment are fallback sources).
+Absent upstream values are omitted: a local response or failed connection
+does not invent a backend status. `http.upstream.response_time` is removed;
+use span duration. `http.upstream.target` and `http.proxy.target` copy Apache's
+actual proxy URL, including its path; the module does not concatenate paths
+or collapse intentional double slashes.
+
+When stripping `/api`, match slashes on both sides of your proxy mapping:
+`ProxyPass /api/ https://backend.example/` forwards
+`/api/items/123` as `/items/123`. A mapping from `/api` to a
+backend ending in `/` can create `//` in the actual backend request.
+For a server/vhost RewriteRule, use
+`RewriteRule ^/api(/.*)$ https://backend.example$1 [P,L]`: the capture
+already starts with `/`, so do not add another slash before `$1`.

@@ -22,8 +22,9 @@ import json
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 class Echo(BaseHTTPRequestHandler):
     def do_GET(self):
-        data = json.dumps(list(self.headers.items()))
-        self.send_response(200)
+        data = json.dumps(list(self.headers.items()) + [('X-Echo-Path', self.path)])
+        status = 503 if self.path.startswith('/status/503') else 200
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
@@ -51,7 +52,9 @@ original = docker("exec", CONTAINER, "cat", CONFIG)
 base = "\n".join(line for line in original.splitlines() if not line.lower().startswith((
     "apachemoduleotelpropagator", "apachemoduletraceroutes", "apachemodulereportallinstrumentedmodules")))
 base += "\nApacheModuleReportAllInstrumentedModules ON\n"
+base += "ProxyPass /services/unavailable/ http://127.0.0.1:8766/\n"
 base += "ProxyPass /services/ http://127.0.0.1:8765/\n"
+base += "ProxyPass /badjoin http://127.0.0.1:8765/\n"
 
 with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
     config_file = Path(directory) / "opentelemetry.conf"
@@ -101,6 +104,8 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 parents = [value for key, value in pairs if key == "traceparent"]
                 assert not any(key == "parent_span_id" for key, _ in pairs), pairs
                 root = next(span for span in spans if span["span kind"] == "Server")
+                assert re.search(r"(?m)^\s*http\.upstream\.status: 200$", logs), logs
+                assert "http.upstream.response_time:" not in logs
                 assert root["parent_span_id"] == ("2222222222222222" if extract and incoming else "0000000000000000"), root
                 if extract and incoming:
                     assert root["trace_id"] == "11111111111111111111111111111111", root
@@ -154,6 +159,32 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
             else:
                 raise AssertionError("Invalid propagation switch accepted")
         print("PASS: malformed propagation switches fail configuration validation")
+
+        apply("\nApacheModuleTraceRoutes /\nApacheModuleOtelPropagatorType w3c\n"
+              "ApacheModuleOtelPropagatorExtract OFF\nApacheModuleOtelPropagatorInject ON\n")
+        response, _, logs = request("/services/dxl/poq/stuff")
+        received_path = dict(json.loads(response))["X-Echo-Path"]
+        assert received_path.startswith("/dxl/poq/stuff?") and "//" not in received_path, received_path
+        for key in ["http.upstream.target", "http.proxy.target"]:
+            match = re.search(r"(?m)^\s*" + re.escape(key) + r": (.*)$", logs)
+            assert match and match.group(1) == "http://127.0.0.1:8765" + received_path, logs
+        print("PASS: stripped /services prefix preserves the exact nested backend URL without adding slashes")
+
+        _, _, logs = request("/services/status/503")
+        assert re.search(r"(?m)^\s*http\.upstream\.status: 503$", logs), logs
+        assert "http.upstream.response_time:" not in logs
+        print("PASS: real upstream 503 response is recorded")
+
+        for path in ["/services/unavailable/echo", "/local-missing"]:
+            _, _, logs = request(path)
+            assert "http.upstream.status:" not in logs and "http.upstream.response_time:" not in logs, logs
+        print("PASS: failed connections and local responses omit nonexistent upstream status")
+
+        response, _, logs = request("/badjoin/dxl/poq/stuff")
+        received_path = dict(json.loads(response))["X-Echo-Path"]
+        assert received_path.startswith("//dxl/poq/stuff?"), received_path
+        assert "http.upstream.target: http://127.0.0.1:8765" + received_path in logs
+        print("PASS: mismatched ProxyPass slashes reproduce // on the wire (telemetry faithfully reports it)")
     finally:
         config_file.write_text(original, encoding="utf-8")
         docker("cp", str(config_file), CONTAINER + ":" + CONFIG)

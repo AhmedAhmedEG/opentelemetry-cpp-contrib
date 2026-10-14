@@ -1052,25 +1052,29 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
             responsePayload->response_attributes[attribute.first] = attribute.second;
         }
     }
-    responsePayload->response_attributes["http.upstream.address"] = upstreamAddress(r);
+    const std::string proxyAddress = upstreamAddress(r);
+    if (!proxyAddress.empty())
+        responsePayload->response_attributes["http.upstream.address"] = proxyAddress;
     const std::string proxyTarget = r->filename && !strncmp(r->filename, "proxy:", 6)
         ? std::string(r->filename + 6)
         : (requestValue(r, "proxy_target") ? requestValue(r, "proxy_target") : "");
-    responsePayload->response_attributes["http.upstream.target"] = proxyTarget;
-    responsePayload->response_attributes["http.proxy.target"] = proxyTarget;
-    const char* upstreamStatus = requestValue(r, "upstream_status");
-    if (!upstreamStatus) upstreamStatus = requestValue(r, "proxy_status");
-    responsePayload->response_attributes["http.upstream.status"] =
-        upstreamStatus ? upstreamStatus : "";
-    const char* upstreamResponseTime = requestValue(r, "upstream_response_time");
-    responsePayload->response_attributes["http.upstream.response_time"] =
-        upstreamResponseTime ? upstreamResponseTime : "";
+    if (!proxyTarget.empty())
+    {
+        responsePayload->response_attributes["http.upstream.target"] = proxyTarget;
+        responsePayload->response_attributes["http.proxy.target"] = proxyTarget;
+    }
+    // mod_proxy_http records the backend's actual status under this hyphenated
+    // note. Do not substitute r->status: that can be a locally generated error.
+    const char* upstreamStatus = requestValue(r, "proxy-status");
+    if (!upstreamStatus || !*upstreamStatus) upstreamStatus = requestValue(r, "upstream_status");
+    if (!upstreamStatus || !*upstreamStatus) upstreamStatus = requestValue(r, "proxy_status");
+    if (upstreamStatus && *upstreamStatus)
+        responsePayload->response_attributes["http.upstream.status"] = upstreamStatus;
     ApacheTracing::writeTrace(r->server, __func__,
-        "upstream target=%s address=%s status=%s response_time=%s",
+        "upstream target=%s address=%s status=%s",
         proxyTarget.c_str(),
-        responsePayload->response_attributes["http.upstream.address"].c_str(),
-        responsePayload->response_attributes["http.upstream.status"].c_str(),
-        responsePayload->response_attributes["http.upstream.response_time"].c_str());
+        proxyAddress.c_str(),
+        upstreamStatus ? upstreamStatus : "");
 
     if (otel_requestHasErrors(r))
     {
