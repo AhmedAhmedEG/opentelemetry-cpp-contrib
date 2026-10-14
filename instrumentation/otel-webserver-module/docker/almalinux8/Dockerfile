@@ -1,4 +1,4 @@
-FROM almalinux:8.10@sha256:9f355ae942d6a6c0561f0771dc053a2cfae9580fc45fa4252756db7c7e80c09f
+FROM almalinux:8.10@sha256:9f355ae942d6a6c0561f0771dc053a2cfae9580fc45fa4252756db7c7e80c09f AS buildtools
 
 ARG BUILD_NUMBER
 
@@ -35,6 +35,11 @@ RUN chmod -R 777 /opt
 
 # install required packages
 
+# Use a HTTPS mirror instead of a location-selected HTTP mirror.
+RUN sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
+    -e 's|^# baseurl=https://repo.almalinux.org/almalinux|baseurl=https://mirror.rackspace.com/almalinux|' \
+    /etc/yum.repos.d/almalinux*.repo
+
 
 RUN dnf install wget -y \
     && dnf install java-1.8.0-openjdk -y \
@@ -48,10 +53,10 @@ RUN dnf groupinstall "Development Tools" -y \
 
 
 # install python 2.7.18
-RUN wget http://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz \
+RUN wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz \
     && unxz Python-${PYTHON_VERSION}.tar.xz \
     && tar -xf Python-${PYTHON_VERSION}.tar \
-    && cd Python-${PYTHON_VERSION} && ./configure --prefix=/usr/local && make && make install \
+    && cd Python-${PYTHON_VERSION} && ./configure --prefix=/usr/local && make -j 6 && make install \
     && cd .. \
     && rm -rf Python-${PYTHON_VERSION}.tar.xz && rm -rf Python-${PYTHON_VERSION}.tar
 
@@ -71,16 +76,20 @@ RUN wget https://cmake.org/files/v${CMAKE_VERSION}/cmake-${CMAKE_0VERSION}-linux
     && cd .. && rm -rf cmake-${CMAKE_0VERSION}-linux-x86_64.tar.gz
 
 
-# install grpc. If planning to upgrade, make sure sed command works
-RUN git clone https://github.com/grpc/grpc \
-  && cd grpc \
-  && git checkout tags/v${GRPC_VERSION} -b v${GRPC_VERSION} \
-  && git submodule update --init \
-  && sed -i "s/target_link_libraries(bssl ssl crypto)/target_link_libraries(bssl ssl crypto rt)/g" third_party/boringssl-with-bazel/CMakeLists.txt \
+# Build gRPC against AlmaLinux's OpenSSL to match the RHEL 8 runtime.
+FROM buildtools AS build
+COPY docker/almalinux8/fetch-submodules.sh /usr/local/bin/fetch-submodules.sh
+RUN git -c http.version=HTTP/1.1 clone --depth 1 --branch v${GRPC_VERSION} https://github.com/grpc/grpc \
+  && cd grpc
+RUN cd grpc \
+  && git config --file .gitmodules --remove-section submodule.third_party/boringssl-with-bazel \
+  && git config --file .gitmodules --remove-section submodule.third_party/bloaty \
+  && sh /usr/local/bin/fetch-submodules.sh
+RUN cd grpc \
   && mkdir -p cmake/build \
   && cd cmake/build \
-  && cmake ../.. -DgRPC_INSTALL=ON -DCMAKE_BUILD_TYPE=Release -DgRPC_ABSL_PROVIDER=module -DgRPC_CARES_PROVIDER=module -DgRPC_PROTOBUF_PROVIDER=module -DgRPC_RE2_PROVIDER=module -DgRPC_SSL_PROVIDER=module -DgRPC_ZLIB_PROVIDER=module \
-  && make \
+  && cmake ../.. -DgRPC_INSTALL=ON -DCMAKE_BUILD_TYPE=Release -DgRPC_ABSL_PROVIDER=module -DgRPC_CARES_PROVIDER=module -DgRPC_PROTOBUF_PROVIDER=module -DgRPC_RE2_PROVIDER=module -DgRPC_SSL_PROVIDER=package -DgRPC_ZLIB_PROVIDER=module \
+  && make -j 6 \
   && make install \
   && cd ../../..
 
@@ -89,7 +98,8 @@ RUN git clone https://github.com/grpc/grpc \
 RUN mkdir -p dependencies
 
 # install boost version 1.75.0
-RUN wget https://archives.boost.io/release/${BOOST_VERSION}/source/${BOOST_FILENAME}_rc1.tar.gz \
+COPY docker/almalinux8/download-archive.sh /usr/local/bin/download-archive.sh
+RUN sh /usr/local/bin/download-archive.sh https://archives.boost.io/release/${BOOST_VERSION}/source/${BOOST_FILENAME}_rc1.tar.gz ${BOOST_FILENAME}_rc1.tar.gz \
     && tar -xvf ${BOOST_FILENAME}_rc1.tar.gz \
     && cd ${BOOST_FILENAME} \
     && ./bootstrap.sh --with-libraries=filesystem,system --prefix=/dependencies/boost/${BOOST_VERSION}/ \
@@ -167,14 +177,13 @@ RUN mkdir -p dependencies/apache-log4cxx/${LOG4CXX_VERSION} \
 # install opentelemetry
 RUN mkdir -p dependencies/opentelemetry/${OPENTELEMETRY_VERSION}/lib \
     && mkdir -p dependencies/opentelemetry/${OPENTELEMETRY_VERSION}/include \
-    && git clone https://github.com/open-telemetry/opentelemetry-cpp \
+    && git -c http.version=HTTP/1.1 clone --depth 1 --branch v${OPENTELEMETRY_VERSION} https://github.com/open-telemetry/opentelemetry-cpp \
     && cd opentelemetry-cpp/ \
-    && git checkout tags/v${OPENTELEMETRY_VERSION} -b v${OPENTELEMETRY_VERSION} \
-    && git submodule update --init --recursive \
+    && git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1 \
     && mkdir build \
     && cd build \
     && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=ON -DWITH_OTLP=ON -DWITH_ABSEIL=ON -DCMAKE_INSTALL_PREFIX=/dependencies/opentelemetry/${OPENTELEMETRY_VERSION} \
-    && cmake --build . --target all \
+    && cmake --build . --target all --parallel 6 \
     && cd .. \
     && find . -name "*.so" -type f -exec cp {} /dependencies/opentelemetry/${OPENTELEMETRY_VERSION}/lib/ \; \
     && cp build/libopentelemetry_proto.a /dependencies/opentelemetry/${OPENTELEMETRY_VERSION}/lib \
@@ -191,7 +200,7 @@ RUN mkdir -p dependencies/googletest/${GTEST_VERSION}/ \
     && cd googletest-release-${GTEST_VERSION}/  \
     && mkdir build && cd build \
     && cmake .. -DCMAKE_INSTALL_PREFIX=/dependencies/googletest/${GTEST_VERSION}/ \
-    && make \
+    && make -j 6 \
     && make install \
     && cd ../.. && rm -rf release-${GTEST_VERSION}.tar.gz && rm -rf googletest-release-${GTEST_VERSION}/
 
@@ -201,7 +210,7 @@ RUN mkdir -p dependencies/pcre/${PCRE_VERSION}/ \
     && tar -xvf pcre-${PCRE_VERSION}.tar.gz \
     && cd pcre-${PCRE_VERSION} \
     && ./configure --prefix=/dependencies/pcre/${PCRE_VERSION} --enable-jit \
-    && make && make install \
+    && make -j 6 && make install \
     && cd .. && rm -rf ${PCRE_VERSION}.tar.gz && rm -rf pcre-${PCRE_VERSION}
 
 #Installing Apache and apr source code
@@ -212,29 +221,34 @@ RUN mkdir build-dependencies \
     && wget --no-check-certificate https://archive.apache.org/dist/apr/apr-util-${APRUTIL_VERSION}.tar.gz \
     && tar -xf apr-util-${APRUTIL_VERSION}.tar.gz \
     && mv -f apr-util-${APRUTIL_VERSION} build-dependencies \
-    && wget --no-check-certificate http://archive.apache.org/dist/httpd/httpd-2.2.31.tar.gz \
+    && wget --no-check-certificate https://archive.apache.org/dist/httpd/httpd-2.2.31.tar.gz \
     && tar -xf httpd-2.2.31.tar.gz \
     && mv -f httpd-2.2.31 build-dependencies \
-    && wget --no-check-certificate http://archive.apache.org/dist/httpd/httpd-2.4.23.tar.gz \
+    && wget --no-check-certificate https://archive.apache.org/dist/httpd/httpd-2.4.23.tar.gz \
     && tar -xf httpd-2.4.23.tar.gz \
     && mv -f httpd-2.4.23 build-dependencies
 
 # install nginx
-RUN wget http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz \
+RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz \
     && tar -xvf nginx-${NGINX_VERSION}.tar.gz -C /build-dependencies \
     && rm -rf nginx-${NGINX_VERSION}.tar.gz
 
 # Build Webserver Module
 COPY . /otel-webserver-module
 
-RUN cp -r /dependencies /otel-webserver-module/ \
+RUN --mount=type=cache,target=/root/.gradle cp -r /dependencies /otel-webserver-module/ \
     && cp -r /build-dependencies /otel-webserver-module/ \
     && cd otel-webserver-module \
+    && sed -i 's/\r$//' gradlew scripts/gyp/r1919/gyp src/nginx/config \
+    && chmod +x gradlew scripts/gyp/r1919/gyp \
     && ./gradlew assembleWebServerModule 
+
+FROM build AS runtime
+ARG NGINX_VERSION="1.26.0"
 
 RUN echo '[nginx-stable]' >> /etc/yum.repos.d/nginx.repo \
     && echo 'name=nginx stable repo' >> /etc/yum.repos.d/nginx.repo \
-    && echo 'baseurl=http://nginx.org/packages/centos/8/$basearch/' >> /etc/yum.repos.d/nginx.repo \
+    && echo 'baseurl=https://nginx.org/packages/centos/8/$basearch/' >> /etc/yum.repos.d/nginx.repo \
     && echo 'gpgcheck=1' >> /etc/yum.repos.d/nginx.repo \
     && echo 'enabled=1' >> /etc/yum.repos.d/nginx.repo \
     && echo 'gpgkey=https://nginx.org/keys/nginx_signing.key' >> /etc/yum.repos.d/nginx.repo \

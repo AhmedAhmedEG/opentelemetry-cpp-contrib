@@ -438,6 +438,26 @@ const char* ApacheConfigHandlers::otel_set_traceRoutes(
         cfg->traceRoutes_initialized, "otel_set_traceRoutes");
 }
 
+const char* ApacheConfigHandlers::otel_set_separateRequestHeaders(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    const char* list = ap_getword_conf(cmd->pool, &arg);
+    if (*arg) return "ApacheModuleSeparateRequestHeaders takes one comma-separated list; quote spaces";
+    return helperChar(cmd, cfg, list, cfg->separateRequestHeaders,
+        cfg->separateRequestHeaders_initialized, "otel_set_separateRequestHeaders");
+}
+
+const char* ApacheConfigHandlers::otel_set_separateResponseHeaders(
+    cmd_parms *cmd, void *conf, const char *arg)
+{
+    otel_cfg* cfg = (otel_cfg*) conf;
+    const char* list = ap_getword_conf(cmd->pool, &arg);
+    if (*arg) return "ApacheModuleSeparateResponseHeaders takes one comma-separated list; quote spaces";
+    return helperChar(cmd, cfg, list, cfg->separateResponseHeaders,
+        cfg->separateResponseHeaders_initialized, "otel_set_separateResponseHeaders");
+}
+
 std::string ApacheConfigHandlers::computeContextName(const otel_cfg* cfg)
 {
     if (!cfg->serviceNamespace_initialized || !cfg->serviceName_initialized || !cfg->serviceInstanceId_initialized)
@@ -592,6 +612,10 @@ void otel_cfg::init()
     captureQueryParameters_initialized = 0;
     traceRoutes = "";
     traceRoutes_initialized = 0;
+    separateRequestHeaders = "";
+    separateRequestHeaders_initialized = 0;
+    separateResponseHeaders = "";
+    separateResponseHeaders_initialized = 0;
 }
 
 bool otel_cfg::validate(const request_rec *r)
@@ -825,6 +849,12 @@ void* ApacheConfigHandlers::otel_merge_dir_config(apr_pool_t* p, void* parent_co
     merged_config->traceRoutes = nconf->traceRoutes_initialized ?
         apr_pstrdup(p, nconf->traceRoutes) : apr_pstrdup(p, pconf->traceRoutes);
     merged_config->traceRoutes_initialized = 1;
+    merged_config->separateRequestHeaders = nconf->separateRequestHeaders_initialized ?
+        apr_pstrdup(p, nconf->separateRequestHeaders) : apr_pstrdup(p, pconf->separateRequestHeaders);
+    merged_config->separateRequestHeaders_initialized = 1;
+    merged_config->separateResponseHeaders = nconf->separateResponseHeaders_initialized ?
+        apr_pstrdup(p, nconf->separateResponseHeaders) : apr_pstrdup(p, pconf->separateResponseHeaders);
+    merged_config->separateResponseHeaders_initialized = 1;
 
 
     ApacheTracing::writeTrace(NULL, __func__,
@@ -922,6 +952,10 @@ otel_cfg* ApacheConfigHandlers::getProcessConfig(const request_rec* r)
     process_cfg->captureQueryParameters_initialized = our_config->captureQueryParameters_initialized;
     process_cfg->traceRoutes = apr_pstrdup(r->server->process->pool, our_config->traceRoutes);
     process_cfg->traceRoutes_initialized = our_config->traceRoutes_initialized;
+    process_cfg->separateRequestHeaders = apr_pstrdup(r->server->process->pool, our_config->separateRequestHeaders);
+    process_cfg->separateRequestHeaders_initialized = our_config->separateRequestHeaders_initialized;
+    process_cfg->separateResponseHeaders = apr_pstrdup(r->server->process->pool, our_config->separateResponseHeaders);
+    process_cfg->separateResponseHeaders_initialized = our_config->separateResponseHeaders_initialized;
 
     return process_cfg;
 }

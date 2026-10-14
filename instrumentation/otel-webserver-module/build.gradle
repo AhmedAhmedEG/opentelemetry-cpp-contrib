@@ -194,6 +194,8 @@ task stageLibrary(type: Copy) {
     from("${modDepDir}/opentelemetry/${cppSDKVersion}/lib/libopentelemetry_exporter_ostream_span.so") { it.into "sdk_lib/lib" }
     from("${modDepDir}/opentelemetry/${cppSDKVersion}/lib/libopentelemetry_exporter_otlp_grpc.so") { it.into "sdk_lib/lib" }
     from("dist/opentelemetry_sdk_log4cxx.xml.template") { it.into "conf" }
+    from("opentelemetry_module.conf") { it.into "conf" }
+    from("README-apache.md") { rename { "README.md" } }
     from("dist/install.${scriptExt}") { it.fileMode 0700 }
 
     into libraryStageDir
@@ -379,7 +381,7 @@ task assembleApacheModule(type: Tar) {
 // NGINX
 nginxSupportedVersions.each { nginxVersion ->
     task("downloadNginx${nginxVersion}", type: Download) {
-        src "http://nginx.org/download/nginx-${nginxVersion}.tar.gz"
+        src "https://nginx.org/download/nginx-${nginxVersion}.tar.gz"
         dest buildDir
         overwrite false
     }

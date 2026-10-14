@@ -225,7 +225,7 @@ static const command_rec otel_cmds[] =
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_captureRequestHeaders,
             NULL,
             OR_ALL,
-            "Capture all request headers and Authorization separately"),
+            "Capture request headers using the configured header separation list"),
     AP_INIT_TAKE1(
             "apacheModuleCaptureResponseHeaders",
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_captureResponseHeaders,
@@ -244,6 +244,18 @@ static const command_rec otel_cmds[] =
             NULL,
             OR_ALL,
             "Comma-separated URI prefixes to trace; empty traces all routes"),
+    AP_INIT_RAW_ARGS(
+            "apacheModuleSeparateRequestHeaders",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_separateRequestHeaders,
+            NULL,
+            OR_ALL,
+            "Comma-separated request headers to move from the combined JSON into individual attributes"),
+    AP_INIT_RAW_ARGS(
+            "apacheModuleSeparateResponseHeaders",
+            (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_separateResponseHeaders,
+            NULL,
+            OR_ALL,
+            "Comma-separated response headers to move from the combined JSON into individual attributes"),
     {NULL}
 };
 

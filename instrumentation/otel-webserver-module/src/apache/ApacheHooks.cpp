@@ -526,20 +526,38 @@ std::string jsonEscape(const std::string& value)
     return escaped.str();
 }
 
-std::string headersAsJson(const apr_table_t* headers, bool excludeAuthorization)
+std::unordered_set<std::string> separateHeaderNames(const char* configured)
+{
+    std::unordered_set<std::string> names;
+    std::istringstream input(configured ? configured : "");
+    std::string name;
+    while (std::getline(input, name, ','))
+    {
+        const size_t first = name.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) continue;
+        name = name.substr(first, name.find_last_not_of(" \t\r\n") - first + 1);
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        names.insert(name);
+    }
+    return names;
+}
+
+std::string headersAsJson(const apr_table_t* headers,
+    const std::unordered_set<std::string>& excludedHeaders)
 {
     std::map<std::string, std::vector<std::string>> values;
     if (headers)
     {
         const apr_array_header_t* entries = apr_table_elts(headers);
-        const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
+        const apr_table_entry_t* table = reinterpret_cast<const apr_table_entry_t*>(entries->elts);
         for (int i = 0; i < entries->nelts; ++i)
         {
             const std::string name = table[i].key ? table[i].key : "";
             std::string lowerName = name;
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (excludeAuthorization && lowerName == "authorization")
+            if (excludedHeaders.count(lowerName))
             {
                 continue;
             }
@@ -573,6 +591,45 @@ std::string headersAsJson(const apr_table_t* headers, bool excludeAuthorization)
     }
     json << "\n}";
     return json.str();
+}
+
+std::unordered_map<std::string, std::string> separatedHeaderAttributes(
+    const apr_table_t* headers, const std::unordered_set<std::string>& selected,
+    const std::string& prefix)
+{
+    std::unordered_map<std::string, std::string> attributes;
+    if (!headers || selected.empty()) return attributes;
+    std::map<std::string, std::vector<std::string>> values;
+    const apr_array_header_t* entries = apr_table_elts(headers);
+    const apr_table_entry_t* table = reinterpret_cast<const apr_table_entry_t*>(entries->elts);
+    for (int i = 0; i < entries->nelts; ++i)
+    {
+        std::string name = table[i].key ? table[i].key : "";
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (selected.count(name)) values[name].push_back(table[i].val ? table[i].val : "");
+    }
+    for (const auto& header : values)
+    {
+        if (header.second.size() == 1)
+        {
+            attributes[prefix + header.first] = header.second.front();
+        }
+        else
+        {
+            // The payload stores strings, so retain repeated values as a JSON array.
+            std::ostringstream json;
+            json << '[';
+            for (size_t i = 0; i < header.second.size(); ++i)
+            {
+                if (i) json << ',';
+                json << jsonEscape(header.second[i]);
+            }
+            json << ']';
+            attributes[prefix + header.first] = json.str();
+        }
+    }
+    return attributes;
 }
 
 int hexValue(char value)
@@ -664,24 +721,6 @@ const char* requestValue(request_rec* request, const char* name)
     return value;
 }
 
-std::string authorizationValue(const apr_table_t* headers)
-{
-    if (!headers) return "";
-    const apr_array_header_t* entries = apr_table_elts(headers);
-    const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
-    for (int i = 0; i < entries->nelts; ++i)
-    {
-        std::string name = table[i].key ? table[i].key : "";
-        std::transform(name.begin(), name.end(), name.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (name == "authorization")
-        {
-            return std::string("\n") + (table[i].val ? table[i].val : "") + "\n";
-        }
-    }
-    return "";
-}
-
 std::string upstreamAddress(request_rec* request)
 {
     const char* value = requestValue(request, "upstream_addr");
@@ -738,12 +777,13 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
     const bool captureHeaders = !cfg || cfg->getCaptureRequestHeaders();
     const bool captureQuery = !cfg || cfg->getCaptureQueryParameters();
+    const auto separateHeaders = separateHeaderNames(cfg ? cfg->getSeparateRequestHeaders() : "");
 
     // Preserve all inbound headers as the propagation carrier and as span attributes.
-    if (captureHeaders && request->headers_in)
+    if (request->headers_in)
     {
         const apr_array_header_t* entries = apr_table_elts(request->headers_in);
-        const apr_table_entry_t* table = static_cast<const apr_table_entry_t*>(entries->elts);
+        const apr_table_entry_t* table = reinterpret_cast<const apr_table_entry_t*>(entries->elts);
         for (int i = 0; i < entries->nelts; ++i)
         {
             const std::string name = table[i].key ? table[i].key : "";
@@ -753,15 +793,21 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             payload->set_http_headers(lowerName, value);
-            if (lowerName != "authorization")
+            if (captureHeaders && !separateHeaders.count(lowerName))
             {
                 payload->set_request_headers(name, value);
             }
         }
-        payload->set_request_attribute("http.request.headers",
-            headersAsJson(request->headers_in, true));
-        payload->set_request_attribute("http.request.headers.authorization",
-            authorizationValue(request->headers_in));
+        if (captureHeaders)
+        {
+            payload->set_request_attribute("http.request.headers",
+                headersAsJson(request->headers_in, separateHeaders));
+            for (const auto& attribute : separatedHeaderAttributes(
+                request->headers_in, separateHeaders, "http.request.headers."))
+            {
+                payload->set_request_attribute(attribute.first, attribute.second);
+            }
+        }
     }
 
     // uri
@@ -843,8 +889,9 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 #endif
 
     payload->set_port(ap_default_port(request));
-    payload->set_operation_name((request->method ? std::string(request->method) : "")
-        + " " + (request->parsed_uri.path ? request->parsed_uri.path : ""));
+    const std::string operationName = (request->method ? std::string(request->method) : "")
+        + " " + (request->parsed_uri.path ? request->parsed_uri.path : "");
+    payload->set_operation_name(operationName.c_str());
 }
 // We have to use this hook if we want to use directory level configuration.
 // post_read_request is too early in the cycle to get the config parameters for a
@@ -975,8 +1022,15 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         {
             responseHeaders = apr_table_overlay(r->pool, r->headers_out, r->err_headers_out);
         }
+        const auto separateHeaders = separateHeaderNames(
+            requestConfig ? requestConfig->getSeparateResponseHeaders() : "");
         responsePayload->response_attributes["http.response.headers"] =
-            headersAsJson(responseHeaders, false);
+            headersAsJson(responseHeaders, separateHeaders);
+        for (const auto& attribute : separatedHeaderAttributes(
+            responseHeaders, separateHeaders, "http.response.headers."))
+        {
+            responsePayload->response_attributes[attribute.first] = attribute.second;
+        }
     }
     responsePayload->response_attributes["http.upstream.address"] = upstreamAddress(r);
     const std::string proxyTarget = r->filename && !strncmp(r->filename, "proxy:", 6)

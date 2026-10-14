@@ -120,6 +120,8 @@ public:
     int getCaptureResponseHeaders() { return captureResponseHeaders; }
     int getCaptureQueryParameters() { return captureQueryParameters; }
     const char* getTraceRoutes() { return traceRoutes; }
+    const char* getSeparateRequestHeaders() { return separateRequestHeaders; }
+    const char* getSeparateResponseHeaders() { return separateResponseHeaders; }
 
     friend class ApacheConfigHandlers;
 
@@ -224,6 +226,10 @@ private:
     int captureQueryParameters_initialized;
     const char* traceRoutes;
     int traceRoutes_initialized;
+    const char* separateRequestHeaders;
+    int separateRequestHeaders_initialized;
+    const char* separateResponseHeaders;
+    int separateResponseHeaders_initialized;
 
 };
 
@@ -279,6 +285,8 @@ public:
     static const char* otel_set_captureResponseHeaders(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_captureQueryParameters(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_set_traceRoutes(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_separateRequestHeaders(cmd_parms *cmd, void *conf, const char *arg);
+    static const char* otel_set_separateResponseHeaders(cmd_parms *cmd, void *conf, const char *arg);
     static const char* otel_add_webserver_context(
             cmd_parms* cmd,
             void* conf,

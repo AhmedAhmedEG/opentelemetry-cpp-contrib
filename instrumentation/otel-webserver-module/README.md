@@ -62,6 +62,37 @@ Monitoring individual modules is crucial to the instrumentation of Apache web se
 
 A sample configuration is mentioned in [opentelemetry_module.conf](https://github.com/open-telemetry/opentelemetry-cpp-contrib/blob/main/instrumentation/otel-webserver-module/opentelemetry_module.conf)
 
+#### Separate request and response header attributes
+
+Use these independent directives to move selected headers out of the combined
+`http.request.headers` or `http.response.headers` JSON string:
+
+```apache
+ApacheModuleSeparateRequestHeaders Authorization,X-Request-ID
+ApacheModuleSeparateResponseHeaders Set-Cookie,X-Response-ID
+```
+
+The example produces `http.request.headers.authorization`,
+`http.request.headers.x-request-id`, `http.response.headers.set-cookie`, and
+`http.response.headers.x-response-id`. These headers are excluded from the
+combined JSON; selected request headers are also excluded from the older
+`http.request.header.<original-name>` attributes.
+
+Lists are comma-separated, case-insensitive, and ignore surrounding whitespace
+and duplicate names. Quote the argument when it contains spaces. Attribute
+suffixes are lowercase. Single values are copied exactly, without added
+newlines. Multiple values are retained as a JSON array string. Headers absent
+from the request or response do not create an attribute.
+
+Both lists default to empty: no headers are separated unless configured.
+The example configuration explicitly selects `Authorization`. Each directive replaces its
+inherited list; use `ApacheModuleSeparateRequestHeaders ""` or
+`ApacheModuleSeparateResponseHeaders ""` to put all captured headers back in
+the combined JSON. `ApacheModuleCaptureRequestHeaders OFF` and
+`ApacheModuleCaptureResponseHeaders OFF` suppress both combined and separated
+attributes in their respective direction. Trace-context propagation remains
+active when header capture is disabled.
+
 ### Build and Installation
 #### Prerequisites
 - Docker Desktop should be installed on the system
