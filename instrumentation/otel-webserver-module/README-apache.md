@@ -102,24 +102,41 @@ headers move out of combined JSON into standard `http.request.header.<lowercase>
 or `http.response.header.<lowercase>` attributes, always as string arrays.
 Missing headers produce no attribute. Lists replace inherited lists; both
 lists default to empty. Only listed headers get separate header attributes.
-Unselected headers remain in custom `apache.http.request.headers` and
-`apache.http.response.headers` JSON strings. Capture OFF suppresses both forms
+Unselected headers remain in custom `http.request.headers` and
+`http.response.headers` JSON strings. Capture OFF suppresses both forms
 without disabling propagation or `x-trace-id`.
 
-Root names remain `METHOD /full/path`, excluding the query. Server spans use
-`http.request.method`, `http.response.status_code` (integer), `url.path`,
-`url.scheme`, optional `url.query`, `server.address`, `server.port` (integer),
-`client.address` and `network.protocol.version`. The raw path is not a route
-template, so it is not emitted as `http.route`. Legacy HTTP/network aliases,
-empty attributes, reconstructed full request URL and decoded query JSON are
-removed. Query capture OFF omits the query attribute.
+Root names remain `METHOD /full/path`, excluding the query. The root span
+emits only these attributes when their values are available:
 
-Proxy client spans use `url.full`, `server.address`, `server.port`,
-`http.request.method` and the actual backend `http.response.status_code` when
-available. These are not duplicated on the server span as `http.upstream.*`
-or `http.proxy.*`. The full proxy URL is copied from Apache without joining
-or collapsing path segments. Span duration supplies timing; `error.type`
-contains an HTTP error status when applicable.
+```text
+network.protocol.version
+server.address
+server.port
+http.request.method
+url.path
+url.query
+url.scheme
+http.response.status_code
+http.request.headers
+http.response.headers
+http.upstream.status_code
+http.upstream.url
+```
+
+`server.port`, `http.response.status_code` and `http.upstream.status_code` are
+integers. `url.query` is the raw query string, not JSON; capture OFF omits it.
+Combined header values are pretty-printed JSON strings. The combined-header
+and `http.upstream.*` attributes are custom conventions. Selected headers add
+only `http.request.header.<lowercase>` / `http.response.header.<lowercase>`
+string-array attributes. `error.type` is added for HTTP 5xx errors.
+
+Upstream details stay on the root span: status is the actual backend response
+from mod_proxy_http's `proxy-status` note, and URL is Apache's actual proxy
+URL. Missing values are omitted. Paths are not joined or normalized by the
+module. Client spans retain trace relationships and timing without duplicating
+these attributes. The root does not emit `client.address`, legacy aliases,
+`url.full`, decoded query JSON, or `http.route` without a known route template.
 
 When stripping `/api`, match slashes on both sides of your proxy mapping:
 `ProxyPass /api/ https://backend.example/` forwards

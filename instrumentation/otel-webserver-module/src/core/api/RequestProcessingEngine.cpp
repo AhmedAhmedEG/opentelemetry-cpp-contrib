@@ -189,7 +189,10 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
             rootSpan->AddAttribute(key, itr->second);
         }
         for (const auto& attribute : payload->response_attributes) {
-            rootSpan->AddAttribute(attribute.first, attribute.second);
+            if (payload->modern_http_attributes && attribute.first == "http.upstream.status_code")
+                rootSpan->AddAttribute(attribute.first, static_cast<int64_t>(std::stol(attribute.second)));
+            else
+                rootSpan->AddAttribute(attribute.first, attribute.second);
         }
 
         for (auto itr = payload->otel_attributes.begin(); itr != payload->otel_attributes.end(); itr++) {
@@ -297,18 +300,6 @@ OTEL_SDK_API OTEL_SDK_STATUS_CODE RequestProcessingEngine::endInteraction(
         LOG4CXX_TRACE(mLogger, "Span updated with error Code: " << payload->errorCode);
     } else {
         interactionSpan->SetStatus(payload->modern_http_attributes ? StatusCode::Unset : StatusCode::Ok);
-    }
-
-    for (const auto& attribute : payload->http_attributes) {
-        if (attribute.first == "server.port")
-            interactionSpan->AddAttribute(attribute.first, static_cast<int64_t>(std::stol(attribute.second)));
-        else
-            interactionSpan->AddAttribute(attribute.first, attribute.second);
-    }
-    if (payload->http_status_code) {
-        interactionSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->http_status_code));
-        if (payload->http_status_code >= 400)
-            interactionSpan->AddAttribute("error.type", std::to_string(payload->http_status_code));
     }
 
     if (!payload->backendName.empty()) {

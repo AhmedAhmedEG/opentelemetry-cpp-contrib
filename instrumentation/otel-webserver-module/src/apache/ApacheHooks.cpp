@@ -32,7 +32,6 @@
 #include <apr_strings.h>
 #include <apr_tables.h>
 #include <apr_optional_hooks.h>
-#include <apr_uri.h>
 #include <httpd.h>
 #include <http_config.h> // ap_get_module_config and others
 #include <http_core.h>
@@ -258,20 +257,6 @@ void ApacheHooks::otel_stopInteraction(request_rec *r, bool isAlwaysRunStage, bo
         std::unique_ptr<otel::core::EndInteractionPayload> payload(new
             otel::core::EndInteractionPayload(backendName, backendType, errorCode, oss.str()));
         payload->modern_http_attributes = true;
-        if (isAlwaysRunStage && !ignoreBackend && r->filename && !strncmp(r->filename, "proxy:", 6))
-        {
-            payload->http_attributes["url.full"] = r->filename + 6;
-            payload->http_attributes["http.request.method"] = r->method ? r->method : "";
-            apr_uri_t uri;
-            if (apr_uri_parse(r->pool, r->filename + 6, &uri) == APR_SUCCESS && uri.hostname)
-            {
-                payload->http_attributes["server.address"] = uri.hostname;
-                const unsigned int port = uri.port ? uri.port : apr_uri_port_of_scheme(uri.scheme);
-                if (port) payload->http_attributes["server.port"] = std::to_string(port);
-            }
-            const char* status = apr_table_get(r->notes, "proxy-status");
-            if (status) payload->http_status_code = static_cast<unsigned int>(atoi(status));
-        }
         OTEL_SDK_STATUS_CODE res = wsAgent.endInteraction(reqHandlePtr, ignoreBackend, payload.get());
 
         if (OTEL_ISFAIL(res))
@@ -796,7 +781,7 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
         {
             // Only the configured separation list creates per-header attrs.
             // Leave the legacy request_headers map empty for Apache.
-            payload->set_request_attribute("apache.http.request.headers",
+            payload->set_request_attribute("http.request.headers",
                 headersAsJson(request->headers_in, separateHeaders));
             for (const auto& attribute : separatedHeaderAttributes(
                 request->headers_in, separateHeaders, "http.request.header."))
@@ -867,13 +852,6 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     const auto slash = protocol.find('/');
     if (slash != std::string::npos)
         payload->set_request_attribute("network.protocol.version", protocol.substr(slash + 1));
-#ifdef APLOG_USE_MODULE
-    const char* clientAddress = request->useragent_ip;
-#else
-    const char* clientAddress = request->connection ? request->connection->remote_ip : NULL;
-#endif
-    if (clientAddress && *clientAddress)
-        payload->set_request_attribute("client.address", clientAddress);
 
     switch (request->proto_num)
     {  // TODO: consider using ap_get_protocol for other flavors
@@ -1038,13 +1016,24 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         }
         const auto separateHeaders = separateHeaderNames(
             requestConfig ? requestConfig->getSeparateResponseHeaders() : "");
-        responsePayload->response_attributes["apache.http.response.headers"] =
+        responsePayload->response_attributes["http.response.headers"] =
             headersAsJson(responseHeaders, separateHeaders);
         for (const auto& attribute : separatedHeaderAttributes(
             responseHeaders, separateHeaders, "http.response.header."))
         {
             responsePayload->header_attributes[attribute.first] = attribute.second;
         }
+    }
+
+    if (r->filename && !strncmp(r->filename, "proxy:", 6))
+        responsePayload->response_attributes["http.upstream.url"] = r->filename + 6;
+    // Record an actual backend response, never substitute Apache's own status.
+    const char* upstreamStatus = apr_table_get(r->notes, "proxy-status");
+    if (upstreamStatus && *upstreamStatus)
+    {
+        const int status = atoi(upstreamStatus);
+        if (status >= 100 && status <= 599)
+            responsePayload->response_attributes["http.upstream.status_code"] = std::to_string(status);
     }
 
     if (otel_requestHasErrors(r))

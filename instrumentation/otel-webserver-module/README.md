@@ -88,8 +88,10 @@ Every traced response includes `x-trace-id` with Apache's current trace ID,
 including errors and with propagation injection OFF. Upstream values are replaced.
 Span attributes use current HTTP semantic names without legacy aliases. See
 [the quick reference](README-apache.md) for the complete attribute mapping.
-Upstream URL and status belong to the proxy client span, using `url.full` and
-`http.response.status_code`.
+Upstream URL and actual backend status stay on the root span as
+`http.upstream.url` and integer `http.upstream.status_code`. The root uses only
+the agreed attribute list documented in the quick reference; client spans do
+not duplicate those fields.
 
 With extraction OFF, Apache reuses the valid incoming trace ID but creates a
 fresh root span (`parent_span_id=0000000000000000`). Its outgoing `traceparent`
@@ -107,7 +109,7 @@ writes can still change headers later.
 #### Separate request and response header attributes
 
 Use these independent directives to move selected headers out of the combined
-`apache.http.request.headers` or `apache.http.response.headers` JSON string:
+`http.request.headers` or `http.response.headers` JSON string:
 
 ```apache
 ApacheModuleSeparateRequestHeaders Authorization,X-Request-ID

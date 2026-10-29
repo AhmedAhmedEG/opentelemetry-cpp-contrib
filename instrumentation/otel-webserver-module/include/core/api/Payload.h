@@ -140,8 +140,6 @@ struct InteractionPayload
 struct EndInteractionPayload
 {
     bool modern_http_attributes = false;
-    std::unordered_map<std::string, std::string> http_attributes;
-    unsigned int http_status_code = 0;
 	std::string backendName;
 	std::string backendType;
 

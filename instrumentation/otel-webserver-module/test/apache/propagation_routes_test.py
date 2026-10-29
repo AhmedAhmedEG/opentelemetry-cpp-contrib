@@ -102,7 +102,24 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                                  "http.server_name", "http.client_ip", "net.host.name", "net.remote.port",
                                  "http.upstream.target", "http.proxy.target", "http.upstream.status"]:
                     assert not re.search(r"(?m)^\s*" + re.escape(obsolete) + ":", logs), obsolete
-                assert "url.full:" not in root_block, root_block
+                allowed = {
+                    "network.protocol.version", "server.address", "server.port", "http.request.method",
+                    "url.path", "url.query", "url.scheme", "http.response.status_code",
+                    "http.request.headers", "http.response.headers", "http.upstream.status_code",
+                    "http.upstream.url", "error.type",
+                }
+                attributes = root_block.split("  attributes    :")[1].split("  events")[0]
+                names = set(re.findall(r"(?m)^\t([^:\n]+):", attributes))
+                unexpected = {name for name in names if name not in allowed
+                              and not name.startswith(("http.request.header.", "http.response.header."))}
+                assert not unexpected, unexpected
+                required = allowed - {"http.upstream.url", "http.upstream.status_code", "error.type"}
+                assert required <= names, (required - names, root_block)
+                assert "url.query: propagation-test=" + marker in attributes
+                for block in logs.split("{\n  name")[1:]:
+                    if "span kind     : Client" in block:
+                        attributes = block.split("  attributes    :")[1].split("  events")[0]
+                        assert not re.search(r"(?m)^\t[^:\n]+:", attributes), block
                 return response, spans, logs
         assert not traced, "No exported span for " + path
         return response, [], logs
@@ -125,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 parents = [value for key, value in pairs if key == "traceparent"]
                 assert not any(key == "parent_span_id" for key, _ in pairs), pairs
                 root = next(span for span in spans if span["span kind"] == "Server")
-                assert re.search(r"(?m)^\s*http\.response\.status_code: 200$", logs), logs
+                assert re.search(r"(?m)^\s*http\.upstream\.status_code: 200$", logs), logs
                 assert "http.upstream.response_time:" not in logs
                 assert root["parent_span_id"] == ("2222222222222222" if extract and incoming else "0000000000000000"), root
                 if incoming:
@@ -222,22 +239,21 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         response, _, logs = request("/services/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("/dxl/poq/stuff?") and "//" not in received_path, received_path
-        for key in ["url.full"]:
+        for key in ["http.upstream.url"]:
             match = re.search(r"(?m)^\s*" + re.escape(key) + r": (.*)$", logs)
             assert match and match.group(1) == "http://127.0.0.1:8765" + received_path, logs
         print("PASS: stripped /services prefix preserves the exact nested backend URL without adding slashes")
 
         _, _, logs = request("/services/status/503")
-        client_blocks = [block for block in logs.split("{\n  name")[1:]
-                         if "span kind     : Client" in block and "url.full:" in block]
-        assert len(client_blocks) == 1, logs
-        assert re.search(r"(?m)^\s*http\.response\.status_code: 503$", client_blocks[0]), logs
+        root_block = next(block for block in logs.split("{\n  name")[1:]
+                          if "span kind     : Server" in block)
+        assert re.search(r"(?m)^\s*http\.upstream\.status_code: 503$", root_block), logs
         assert "http.upstream.response_time:" not in logs
         print("PASS: real upstream 503 response is recorded")
 
         for path in ["/services/unavailable/echo", "/local-missing"]:
             _, _, logs = request(path)
-            assert "http.upstream.status:" not in logs and "http.upstream.response_time:" not in logs, logs
+            assert "http.upstream.status_code:" not in logs and "http.upstream.response_time:" not in logs, logs
             for block in logs.split("{\n  name")[1:]:
                 if "span kind     : Client" in block:
                     assert "http.response.status_code:" not in block, block
@@ -246,7 +262,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         response, _, logs = request("/badjoin/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("//dxl/poq/stuff?"), received_path
-        assert "url.full: http://127.0.0.1:8765" + received_path in logs
+        assert "http.upstream.url: http://127.0.0.1:8765" + received_path in logs
         print("PASS: mismatched ProxyPass slashes reproduce // on the wire (telemetry faithfully reports it)")
 
         # Cold-start concurrency: one process and batch export keep console

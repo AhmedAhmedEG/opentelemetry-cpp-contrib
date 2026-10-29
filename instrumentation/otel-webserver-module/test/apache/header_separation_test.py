@@ -28,7 +28,7 @@ def docker(*args):
 
 def combined(logs, direction):
     match = re.search(
-        r"(?m)^\s*apache\.http\." + direction + r"\.headers: (\{.*?^\})",
+        r"(?m)^\s*http\." + direction + r"\.headers: (\{.*?^\})",
         logs,
         re.DOTALL,
     )
@@ -160,7 +160,7 @@ ApacheModuleSeparateResponseHeaders X-Response-ID
             "ApacheModuleCaptureRequestHeaders ON", "ApacheModuleCaptureRequestHeaders OFF"
         ).replace("ApacheModuleCaptureResponseHeaders ON", "ApacheModuleCaptureResponseHeaders OFF")
         logs = apply_and_request(disabled)
-        assert not re.search(r"(?m)^\s*http\.(request|response)\.header(?:\.[^:]+)?:", logs)
+        assert not re.search(r"(?m)^\s*http\.(request|response)\.headers?(?:\.[^:]+)?:", logs)
         assert "trace_id      : 11111111111111111111111111111111" in logs
         print("PASS: capture OFF suppresses header attributes and retains propagation")
     finally:
