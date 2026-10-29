@@ -116,7 +116,7 @@ SSLProxyCheckPeerCN off
                 assert pairs['x-echo-path'].startswith('/dxl/poq/stuff?'), pairs
                 for _ in range(50):
                     logs = docker('logs', '--since', since, CONTAINER)
-                    if 'http.target: ' + target in logs:
+                    if 'url.query: ' + target.split('?', 1)[1] in logs:
                         break
                     time.sleep(0.1)
                 spans = span_records(logs)

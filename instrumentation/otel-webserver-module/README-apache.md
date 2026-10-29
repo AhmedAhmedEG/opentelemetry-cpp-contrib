@@ -44,7 +44,7 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `TraceAsError` | `ON`: diagnostics at error level; `OFF`: normal trace level. |
 | `CaptureRequestHeaders` | `ON` / `OFF`: combined and separated request attributes. |
 | `CaptureResponseHeaders` | `ON` / `OFF`: combined and separated response attributes. |
-| `CaptureQueryParameters` | `ON` / `OFF`: decoded `http.query.parameters`. |
+| `CaptureQueryParameters` | `ON` / `OFF`: `url.query` (omitted when OFF). |
 | `SeparateRequestHeaders` | Comma-separated names; default empty; `""` clears. |
 | `SeparateResponseHeaders` | Comma-separated names; default empty; `""` clears. |
 | `TraceRoutes` | Comma-separated paths and all descendants; trailing slashes allowed. Omit or use `/` for all routes. |
@@ -92,24 +92,34 @@ header attributes still show the incoming parent's span ID. Other roots already
 exported by Dynatrace can coexist in that trace; this does not replace them or
 make Apache the sole trace owner in Grafana.
 
-Header lists match case-insensitively; quote lists containing spaces. Listed
-headers move out of the combined JSON into `http.request.headers.<lowercase>`
-or `http.response.headers.<lowercase>`. Repeated values use a JSON array string;
-missing headers produce no attribute. Lists replace inherited lists. Only
-listed headers get per-header attributes; other captured headers appear solely
-in the combined JSON. Apache no longer emits legacy
-`http.request.header.<original-name>` attributes. Both lists default to empty.
-Header capture OFF leaves trace propagation active.
+Every traced response includes exactly one `x-trace-id` containing the current
+Apache trace ID, including errors and when injection or header capture is OFF.
+An upstream `x-trace-id` is replaced. Disabled/excluded requests have no Apache
+trace ID to return.
 
-Root names are `METHOD /full/path`, excluding the query. HTTP status, URL,
-route, and available upstream attributes need no extra directive.
-`http.upstream.status` uses mod_proxy_http's `proxy-status` note (legacy
-`upstream_status` / `proxy_status` notes or environment are fallback sources).
-Absent upstream values are omitted: a local response or failed connection
-does not invent a backend status. `http.upstream.response_time` is removed;
-use span duration. `http.upstream.target` and `http.proxy.target` copy Apache's
-actual proxy URL, including its path; the module does not concatenate paths
-or collapse intentional double slashes.
+Header lists match case-insensitively; quote lists containing spaces. Listed
+headers move out of combined JSON into standard `http.request.header.<lowercase>`
+or `http.response.header.<lowercase>` attributes, always as string arrays.
+Missing headers produce no attribute. Lists replace inherited lists; both
+lists default to empty. Only listed headers get separate header attributes.
+Unselected headers remain in custom `apache.http.request.headers` and
+`apache.http.response.headers` JSON strings. Capture OFF suppresses both forms
+without disabling propagation or `x-trace-id`.
+
+Root names remain `METHOD /full/path`, excluding the query. Server spans use
+`http.request.method`, `http.response.status_code` (integer), `url.path`,
+`url.scheme`, optional `url.query`, `server.address`, `server.port` (integer),
+`client.address` and `network.protocol.version`. The raw path is not a route
+template, so it is not emitted as `http.route`. Legacy HTTP/network aliases,
+empty attributes, reconstructed full request URL and decoded query JSON are
+removed. Query capture OFF omits the query attribute.
+
+Proxy client spans use `url.full`, `server.address`, `server.port`,
+`http.request.method` and the actual backend `http.response.status_code` when
+available. These are not duplicated on the server span as `http.upstream.*`
+or `http.proxy.*`. The full proxy URL is copied from Apache without joining
+or collapsing path segments. Span duration supplies timing; `error.type`
+contains an HTTP error status when applicable.
 
 When stripping `/api`, match slashes on both sides of your proxy mapping:
 `ProxyPass /api/ https://backend.example/` forwards

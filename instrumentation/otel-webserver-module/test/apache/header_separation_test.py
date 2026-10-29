@@ -28,7 +28,7 @@ def docker(*args):
 
 def combined(logs, direction):
     match = re.search(
-        r"(?m)^\s*http\." + direction + r"\.headers: (\{.*?^\})",
+        r"(?m)^\s*apache\.http\." + direction + r"\.headers: (\{.*?^\})",
         logs,
         re.DOTALL,
     )
@@ -78,8 +78,7 @@ def apply_and_request(config, path="/services/index.html", expected_status="200"
     for _ in range(50):
         time.sleep(0.1)
         logs = docker("logs", "--since", since, CONTAINER)
-        if "http.target: " + target in logs:
-            assert not re.search(r"(?m)^\s*http\.(request|response)\.header\.", logs), "Unexpected legacy per-header attributes"
+        if "url.query: header-test=" + marker in logs:
             return logs
     raise AssertionError("Request span was not exported")
 
@@ -91,16 +90,14 @@ def check_selected(logs):
     assert request["x-keep-request"] == "keep-request"
     assert "set-cookie" not in response and "x-response-id" not in response
     assert response["x-keep-response"] == "keep-response"
-    assert attribute(logs, "http.request.headers.x-keep-request") is None
-    assert attribute(logs, "http.response.headers.x-keep-response") is None
-    assert attribute(logs, "http.request.headers.authorization") == "Bearer fixture-token"
-    assert attribute(logs, "http.request.headers.x-request-id") == "request-id"
-    assert attribute(logs, "http.response.headers.x-response-id") == "response-id"
-    assert json.loads(attribute(logs, "http.response.headers.set-cookie")) == [
-        "a=1; Expires=Tue, 01 Jan 2030 00:00:00 GMT", "b=2"
-    ]
-    assert attribute(logs, "http.request.headers.x-missing") is None
-    assert attribute(logs, "http.response.headers.x-missing") is None
+    assert attribute(logs, "http.request.header.x-keep-request") is None
+    assert attribute(logs, "http.response.header.x-keep-response") is None
+    assert attribute(logs, "http.request.header.authorization") == "[Bearer fixture-token]"
+    assert attribute(logs, "http.request.header.x-request-id") == "[request-id]"
+    assert attribute(logs, "http.response.header.x-response-id") == "[response-id]"
+    assert attribute(logs, "http.response.header.set-cookie") == "[a=1; Expires=Tue, 01 Jan 2030 00:00:00 GMT,b=2]"
+    assert attribute(logs, "http.request.header.x-missing") is None
+    assert attribute(logs, "http.response.header.x-missing") is None
     assert attribute(logs, "http.request.header.X-Request-ID") is None
     assert "trace_id      : 11111111111111111111111111111111" in logs
 
@@ -109,13 +106,13 @@ with tempfile.TemporaryDirectory(prefix="otel-header-test-") as directory:
     config_file = Path(directory) / "opentelemetry.conf"
     try:
         logs = apply_and_request(base + fixtures)
-        assert attribute(logs, "http.request.headers.authorization") is None
+        assert attribute(logs, "http.request.header.authorization") is None
         assert combined(logs, "request")["authorization"] == "Bearer fixture-token"
-        assert attribute(logs, "http.request.headers.x-request-id") is None
-        assert attribute(logs, "http.response.headers.set-cookie") is None
-        assert attribute(logs, "http.response.headers.x-response-id") is None
+        assert attribute(logs, "http.request.header.x-request-id") is None
+        assert attribute(logs, "http.response.header.set-cookie") is None
+        assert attribute(logs, "http.response.header.x-response-id") is None
         assert "set-cookie" in combined(logs, "response")
-        assert not re.search(r"(?m)^\s*http\.(request|response)\.headers\.[^:]+:", logs)
+        assert not re.search(r"(?m)^\s*http\.(request|response)\.header\.[^:]+:", logs)
         print("PASS: both lists default to empty; Authorization stays in combined JSON")
 
         logs = apply_and_request(base + fixtures + """
@@ -123,12 +120,12 @@ ApacheModuleSeparateRequestHeaders X-Request-ID
 ApacheModuleSeparateResponseHeaders X-Response-ID
 """)
         assert combined(logs, "request")["authorization"] == "Bearer fixture-token"
-        assert attribute(logs, "http.request.headers.authorization") is None
-        assert attribute(logs, "http.request.headers.x-request-id") == "request-id"
+        assert attribute(logs, "http.request.header.authorization") is None
+        assert attribute(logs, "http.request.header.x-request-id") == "[request-id]"
         assert "set-cookie" in combined(logs, "response")
-        assert attribute(logs, "http.response.headers.x-response-id") == "response-id"
-        selected = set(re.findall(r"(?m)^\s*(http\.(?:request|response)\.headers\.[^:]+):", logs))
-        assert selected == {"http.request.headers.x-request-id", "http.response.headers.x-response-id"}, selected
+        assert attribute(logs, "http.response.header.x-response-id") == "[response-id]"
+        selected = set(re.findall(r"(?m)^\s*(http\.(?:request|response)\.header\.[^:]+):", logs))
+        assert selected == {"http.request.header.x-request-id", "http.response.header.x-response-id"}, selected
         print("PASS: explicit lists replace defaults independently")
 
         check_selected(apply_and_request(base + fixtures + selection))
@@ -147,8 +144,8 @@ ApacheModuleSeparateResponseHeaders X-Response-ID
         assert combined(logs, "request")["authorization"] == "Bearer fixture-token"
         assert combined(logs, "request")["x-request-id"] == "request-id"
         assert "set-cookie" in combined(logs, "response")
-        assert attribute(logs, "http.request.headers.authorization") is None
-        assert attribute(logs, "http.response.headers.set-cookie") is None
+        assert attribute(logs, "http.request.header.authorization") is None
+        assert attribute(logs, "http.response.header.set-cookie") is None
         print("PASS: child configuration overrides and explicit empty lists")
 
         location = """
@@ -163,7 +160,7 @@ ApacheModuleSeparateResponseHeaders X-Response-ID
             "ApacheModuleCaptureRequestHeaders ON", "ApacheModuleCaptureRequestHeaders OFF"
         ).replace("ApacheModuleCaptureResponseHeaders ON", "ApacheModuleCaptureResponseHeaders OFF")
         logs = apply_and_request(disabled)
-        assert not re.search(r"(?m)^\s*http\.(request|response)\.headers(?:\.[^:]+)?:", logs)
+        assert not re.search(r"(?m)^\s*http\.(request|response)\.header(?:\.[^:]+)?:", logs)
         assert "trace_id      : 11111111111111111111111111111111" in logs
         print("PASS: capture OFF suppresses header attributes and retains propagation")
     finally:

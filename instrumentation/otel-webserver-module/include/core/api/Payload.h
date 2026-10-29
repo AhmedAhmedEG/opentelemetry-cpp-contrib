@@ -18,6 +18,7 @@
 #define __PAYLOAD_H
 
 #include <unordered_map>
+#include <vector>
 #include "sdkwrapper/SdkConstants.h"
 
 namespace otel {
@@ -53,6 +54,9 @@ class RequestPayload
     long port = 80;
 
 public:
+    bool modern_http_attributes = false;
+    std::string trace_id; // Filled by startRequest from the created server span.
+    std::unordered_map<std::string, std::vector<std::string>> header_attributes;
 	void set_http_headers(const std::string& key, const std::string& value)
     {
         http_headers[key] = value;
@@ -111,6 +115,8 @@ public:
 
 struct ResponsePayload
 {
+    bool modern_http_attributes = false;
+    std::unordered_map<std::string, std::vector<std::string>> header_attributes;
 	std::unordered_map<std::string, std::string> response_headers;
     std::unordered_map<std::string, std::string> response_attributes;
 	std::unordered_map<std::string, std::string> otel_attributes;
@@ -119,6 +125,7 @@ struct ResponsePayload
 
 struct InteractionPayload
 {
+    bool modern_http_attributes = false;
 	// Endpoint
 	std::string moduleName;
 	std::string phaseName;
@@ -132,6 +139,9 @@ struct InteractionPayload
 
 struct EndInteractionPayload
 {
+    bool modern_http_attributes = false;
+    std::unordered_map<std::string, std::string> http_attributes;
+    unsigned int http_status_code = 0;
 	std::string backendName;
 	std::string backendType;
 

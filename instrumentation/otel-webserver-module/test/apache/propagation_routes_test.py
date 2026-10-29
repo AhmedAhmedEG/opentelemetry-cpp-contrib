@@ -81,16 +81,29 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         since = docker("exec", CONTAINER, "date", "-u", "+%Y-%m-%dT%H:%M:%S.%NZ").strip()
         marker = uuid.uuid4().hex
         target = path + "?propagation-test=" + marker
-        args = ["exec", CONTAINER, "curl", "-sS"]
+        args = ["exec", CONTAINER, "curl", "-sS", "-D", "-"]
         for header in headers:
             args += ["-H", header]
-        response = docker(*args, "http://localhost" + target)
+        wire_response = docker(*args, "http://localhost" + target)
+        response_headers, response = wire_response.replace("\r\n", "\n").split("\n\n", 1)
         for _ in range(50 if traced else 5):
             time.sleep(0.1)
             logs = docker("logs", "--since", since, CONTAINER)
-            if "http.target: " + target in logs:
+            if "url.query: propagation-test=" + marker in logs:
                 assert traced, "Excluded route was traced: " + path
-                return response, span_records(logs), logs
+                spans = span_records(logs)
+                root = next(span for span in spans if span["span kind"] == "Server")
+                trace_headers = re.findall(r"(?im)^x-trace-id: ([0-9a-f]{32})$", response_headers)
+                assert trace_headers == [root["trace_id"]], (response_headers, root)
+                root_block = next(block for block in logs.split("{\n  name")[1:]
+                                  if "span kind     : Server" in block)
+                for obsolete in ["http.target", "http.url", "http.host", "http.scheme", "http.route",
+                                 "http.method", "http.status_code", "http.flavor", "request_protocol",
+                                 "http.server_name", "http.client_ip", "net.host.name", "net.remote.port",
+                                 "http.upstream.target", "http.proxy.target", "http.upstream.status"]:
+                    assert not re.search(r"(?m)^\s*" + re.escape(obsolete) + ":", logs), obsolete
+                assert "url.full:" not in root_block, root_block
+                return response, spans, logs
         assert not traced, "No exported span for " + path
         return response, [], logs
 
@@ -112,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 parents = [value for key, value in pairs if key == "traceparent"]
                 assert not any(key == "parent_span_id" for key, _ in pairs), pairs
                 root = next(span for span in spans if span["span kind"] == "Server")
-                assert re.search(r"(?m)^\s*http\.upstream\.status: 200$", logs), logs
+                assert re.search(r"(?m)^\s*http\.response\.status_code: 200$", logs), logs
                 assert "http.upstream.response_time:" not in logs
                 assert root["parent_span_id"] == ("2222222222222222" if extract and incoming else "0000000000000000"), root
                 if incoming:
@@ -209,25 +222,31 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         response, _, logs = request("/services/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("/dxl/poq/stuff?") and "//" not in received_path, received_path
-        for key in ["http.upstream.target", "http.proxy.target"]:
+        for key in ["url.full"]:
             match = re.search(r"(?m)^\s*" + re.escape(key) + r": (.*)$", logs)
             assert match and match.group(1) == "http://127.0.0.1:8765" + received_path, logs
         print("PASS: stripped /services prefix preserves the exact nested backend URL without adding slashes")
 
         _, _, logs = request("/services/status/503")
-        assert re.search(r"(?m)^\s*http\.upstream\.status: 503$", logs), logs
+        client_blocks = [block for block in logs.split("{\n  name")[1:]
+                         if "span kind     : Client" in block and "url.full:" in block]
+        assert len(client_blocks) == 1, logs
+        assert re.search(r"(?m)^\s*http\.response\.status_code: 503$", client_blocks[0]), logs
         assert "http.upstream.response_time:" not in logs
         print("PASS: real upstream 503 response is recorded")
 
         for path in ["/services/unavailable/echo", "/local-missing"]:
             _, _, logs = request(path)
             assert "http.upstream.status:" not in logs and "http.upstream.response_time:" not in logs, logs
+            for block in logs.split("{\n  name")[1:]:
+                if "span kind     : Client" in block:
+                    assert "http.response.status_code:" not in block, block
         print("PASS: failed connections and local responses omit nonexistent upstream status")
 
         response, _, logs = request("/badjoin/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("//dxl/poq/stuff?"), received_path
-        assert "http.upstream.target: http://127.0.0.1:8765" + received_path in logs
+        assert "url.full: http://127.0.0.1:8765" + received_path in logs
         print("PASS: mismatched ProxyPass slashes reproduce // on the wire (telemetry faithfully reports it)")
 
         # Cold-start concurrency: one process and batch export keep console
@@ -249,7 +268,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
             responses = list(executor.map(send, markers))
         for _ in range(100):
             logs = docker("logs", "--since", since, CONTAINER)
-            if all("http.target: /services/echo?race=" + marker in logs for marker in markers):
+            if all("url.query: race=" + marker in logs for marker in markers):
                 break
             time.sleep(0.1)
         else:
@@ -258,7 +277,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         records = span_records(logs)
         trace_ids = set()
         for marker, wire in responses:
-            block = next(block for block in blocks if "http.target: /services/echo?race=" + marker in block)
+            block = next(block for block in blocks if "url.query: race=" + marker in block)
             root = dict(re.findall(r"(?m)^\s*(trace_id|span_id|parent_span_id|span kind)\s*:\s*(\S+)", block))
             _, trace_id, span_id, _ = wire.split("-")
             client = next(span for span in records if span["span_id"] == span_id)

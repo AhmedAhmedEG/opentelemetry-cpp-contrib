@@ -32,8 +32,10 @@
 #include <apr_strings.h>
 #include <apr_tables.h>
 #include <apr_optional_hooks.h>
+#include <apr_uri.h>
 #include <httpd.h>
 #include <http_config.h> // ap_get_module_config and others
+#include <http_core.h>
 #include <http_log.h> // ap_log_error and others
 #include <http_protocol.h> // ap_hook_get_pre_read_request and others
 #include <http_request.h> // ap_hook_get_create_request and others
@@ -64,6 +66,19 @@ using namespace otel::core::sdkwrapper;
 
 namespace {
 const char* const OTEL_PROPAGATION_KEY = "otel_authoritative_propagation";
+const char* const OTEL_RESPONSE_TRACE_KEY = "otel_response_trace_id";
+
+void setResponseTraceId(request_rec* request)
+{
+    void* stored = NULL;
+    for (request_rec* owner = request; owner && !stored; owner = owner->prev)
+        apr_pool_userdata_get(&stored, OTEL_RESPONSE_TRACE_KEY, owner->pool);
+    if (!stored && request->main)
+        apr_pool_userdata_get(&stored, OTEL_RESPONSE_TRACE_KEY, request->main->pool);
+    if (!stored) return; // Disabled/excluded requests have no module trace.
+    apr_table_unset(request->headers_out, "x-trace-id");
+    apr_table_set(request->err_headers_out, "x-trace-id", static_cast<const char*>(stored));
+}
 
 void clearTraceHeaders(request_rec* request)
 {
@@ -95,10 +110,13 @@ void ApacheHooks::registerHooks(apr_pool_t *p)
     ap_hook_header_parser(ApacheHooks::otel_hook_header_parser_begin, NULL, NULL, APR_HOOK_REALLY_FIRST - 2);
     ap_hook_log_transaction(ApacheHooks::otel_hook_log_transaction_end, NULL, NULL, APR_HOOK_REALLY_LAST + 2);
 
-    // Register the output filter after the response resource is generated (AP_FTYPE_CONTENT_SET).
+    // Run after content filters (including mod_headers), before HTTP headers
+    // are serialized. This also replaces competing values on error responses.
     // The filter gets added into the chain in otel_hook_interaction_end_insert_filter via ap_hook_insert_filter.
-    ap_register_output_filter(OTEL_OUTPUT_FILTER_NAME, ApacheHooks::otel_output_filter, NULL, AP_FTYPE_CONTENT_SET);
+    ap_register_output_filter(OTEL_OUTPUT_FILTER_NAME, ApacheHooks::otel_output_filter, NULL,
+        static_cast<ap_filter_type>(AP_FTYPE_PROTOCOL - 1));
     ap_hook_insert_filter(ApacheHooks::otel_hook_interaction_end_insert_filter, NULL, NULL, APR_HOOK_REALLY_FIRST - 2);
+    ap_hook_insert_error_filter(ApacheHooks::otel_hook_interaction_end_insert_filter, NULL, NULL, APR_HOOK_REALLY_FIRST - 2);
 
     // TODO: For the time being put in a hook at the very beginning of every stage we are instrumenting. This is a
     // catch all to stop a interaction. We can be smarter and only put it in when we know that there is a
@@ -199,6 +217,7 @@ void ApacheHooks::registerHooks(apr_pool_t *p)
 
 apr_status_t ApacheHooks::otel_output_filter(ap_filter_t* f, apr_bucket_brigade* bb)
 {
+    setResponseTraceId(f->r);
     if (APR_BRIGADE_EMPTY(bb))
     {
         // "An output filter should never pass an empty brigade down the filter chain."
@@ -238,6 +257,21 @@ void ApacheHooks::otel_stopInteraction(request_rec *r, bool isAlwaysRunStage, bo
 
         std::unique_ptr<otel::core::EndInteractionPayload> payload(new
             otel::core::EndInteractionPayload(backendName, backendType, errorCode, oss.str()));
+        payload->modern_http_attributes = true;
+        if (isAlwaysRunStage && !ignoreBackend && r->filename && !strncmp(r->filename, "proxy:", 6))
+        {
+            payload->http_attributes["url.full"] = r->filename + 6;
+            payload->http_attributes["http.request.method"] = r->method ? r->method : "";
+            apr_uri_t uri;
+            if (apr_uri_parse(r->pool, r->filename + 6, &uri) == APR_SUCCESS && uri.hostname)
+            {
+                payload->http_attributes["server.address"] = uri.hostname;
+                const unsigned int port = uri.port ? uri.port : apr_uri_port_of_scheme(uri.scheme);
+                if (port) payload->http_attributes["server.port"] = std::to_string(port);
+            }
+            const char* status = apr_table_get(r->notes, "proxy-status");
+            if (status) payload->http_status_code = static_cast<unsigned int>(atoi(status));
+        }
         OTEL_SDK_STATUS_CODE res = wsAgent.endInteraction(reqHandlePtr, ignoreBackend, payload.get());
 
         if (OTEL_ISFAIL(res))
@@ -282,6 +316,7 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
 
         std::unique_ptr<otel::core::InteractionPayload> payload(new
             otel::core::InteractionPayload(module, stage, resolveBackends));
+        payload->modern_http_attributes = true;
 
         // Create propagationHeaders to be populated in startInteraction.
         std::unordered_map<std::string, std::string> propagationHeaders;
@@ -669,11 +704,11 @@ std::string headersAsJson(const apr_table_t* headers,
     return json.str();
 }
 
-std::unordered_map<std::string, std::string> separatedHeaderAttributes(
+std::unordered_map<std::string, std::vector<std::string>> separatedHeaderAttributes(
     const apr_table_t* headers, const std::unordered_set<std::string>& selected,
     const std::string& prefix)
 {
-    std::unordered_map<std::string, std::string> attributes;
+    std::unordered_map<std::string, std::vector<std::string>> attributes;
     if (!headers || selected.empty()) return attributes;
     std::map<std::string, std::vector<std::string>> values;
     const apr_array_header_t* entries = apr_table_elts(headers);
@@ -686,133 +721,8 @@ std::unordered_map<std::string, std::string> separatedHeaderAttributes(
         if (selected.count(name)) values[name].push_back(table[i].val ? table[i].val : "");
     }
     for (const auto& header : values)
-    {
-        if (header.second.size() == 1)
-        {
-            attributes[prefix + header.first] = header.second.front();
-        }
-        else
-        {
-            // The payload stores strings, so retain repeated values as a JSON array.
-            std::ostringstream json;
-            json << '[';
-            for (size_t i = 0; i < header.second.size(); ++i)
-            {
-                if (i) json << ',';
-                json << jsonEscape(header.second[i]);
-            }
-            json << ']';
-            attributes[prefix + header.first] = json.str();
-        }
-    }
+        attributes[prefix + header.first] = header.second;
     return attributes;
-}
-
-int hexValue(char value)
-{
-    if (value >= '0' && value <= '9') return value - '0';
-    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-    return -1;
-}
-
-std::string urlDecode(const std::string& value)
-{
-    std::string result;
-    for (size_t i = 0; i < value.size(); ++i)
-    {
-        if (value[i] == '%' && i + 2 < value.size())
-        {
-            const int high = hexValue(value[i + 1]);
-            const int low = hexValue(value[i + 2]);
-            if (high >= 0 && low >= 0)
-            {
-                result.push_back(static_cast<char>((high << 4) | low));
-                i += 2;
-                continue;
-            }
-        }
-        result.push_back(value[i] == '+' ? ' ' : value[i]);
-    }
-    return result;
-}
-
-std::string queryParametersAsJson(const char* query)
-{
-    std::map<std::string, std::vector<std::string>> values;
-    if (query && *query)
-    {
-        std::string queryString(query);
-        size_t start = 0;
-        while (start <= queryString.size())
-        {
-            const size_t end = queryString.find('&', start);
-            const std::string pair = queryString.substr(start,
-                end == std::string::npos ? std::string::npos : end - start);
-            const size_t separator = pair.find('=');
-            const std::string name = urlDecode(pair.substr(0, separator));
-            const std::string value = separator == std::string::npos
-                ? "" : urlDecode(pair.substr(separator + 1));
-            values[name].push_back(value);
-            if (end == std::string::npos) break;
-            start = end + 1;
-        }
-    }
-
-    std::ostringstream json;
-    if (values.empty()) return "{}";
-    json << "{\n";
-    bool first = true;
-    for (const auto& parameter : values)
-    {
-        if (!first) json << ",\n";
-        first = false;
-        json << jsonEscape(parameter.first) << ": ";
-        if (parameter.second.size() == 1)
-        {
-            json << jsonEscape(parameter.second.front());
-        }
-        else
-        {
-            json << "[";
-            for (size_t i = 0; i < parameter.second.size(); ++i)
-            {
-                if (i != 0) json << ",";
-                json << jsonEscape(parameter.second[i]);
-            }
-            json << "]";
-        }
-    }
-    json << "\n}";
-    return json.str();
-}
-
-const char* requestValue(request_rec* request, const char* name)
-{
-    const char* value = request && request->notes ? apr_table_get(request->notes, name) : nullptr;
-    if (!value && request && request->subprocess_env)
-    {
-        value = apr_table_get(request->subprocess_env, name);
-    }
-    return value;
-}
-
-std::string upstreamAddress(request_rec* request)
-{
-    const char* value = requestValue(request, "upstream_addr");
-    if (value && *value) return value;
-    value = requestValue(request, "proxy_host");
-    if (value && *value) return value;
-    if (request && request->filename && !strncmp(request->filename, "proxy:", 6))
-    {
-        std::string target(request->filename + 6);
-        const size_t scheme = target.find("://");
-        const size_t hostStart = scheme == std::string::npos ? 0 : scheme + 3;
-        const size_t pathStart = target.find('/', hostStart);
-        return target.substr(hostStart, pathStart == std::string::npos
-            ? std::string::npos : pathStart - hostStart);
-    }
-    return "";
 }
 
 bool routeIsTraceable(const char* path, const char* routes)
@@ -849,6 +759,7 @@ bool routeIsTraceable(const char* path, const char* routes)
 
 void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payload)
 {
+    payload->modern_http_attributes = true;
     const char* val;
 
     otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
@@ -885,12 +796,12 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
         {
             // Only the configured separation list creates per-header attrs.
             // Leave the legacy request_headers map empty for Apache.
-            payload->set_request_attribute("http.request.headers",
+            payload->set_request_attribute("apache.http.request.headers",
                 headersAsJson(request->headers_in, separateHeaders));
             for (const auto& attribute : separatedHeaderAttributes(
-                request->headers_in, separateHeaders, "http.request.headers."))
+                request->headers_in, separateHeaders, "http.request.header."))
             {
-                payload->set_request_attribute(attribute.first, attribute.second);
+                payload->header_attributes[attribute.first] = attribute.second;
             }
         }
     }
@@ -920,8 +831,8 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     payload->set_http_get_parameter(val);
     if (captureQuery)
     {
-        payload->set_request_attribute("http.query.parameters",
-            queryParametersAsJson(request->args));
+        if (request->args && *request->args)
+            payload->set_request_attribute("url.query", request->args);
     }
 
     // http_request_method
@@ -947,11 +858,22 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     const std::string route = request->parsed_uri.path ? request->parsed_uri.path : "";
     const std::string scheme = ap_run_http_scheme(request) ? ap_run_http_scheme(request) : "";
     const std::string host = request->hostname ? request->hostname : "";
-    const std::string target = request->unparsed_uri ? request->unparsed_uri : "";
-    payload->set_request_attribute("http.route", route);
-    payload->set_request_attribute("http.scheme", scheme);
-    payload->set_request_attribute("http.host", host);
-    payload->set_request_attribute("http.url", scheme + "://" + host + target);
+    payload->set_request_attribute("url.path", route);
+    payload->set_request_attribute("url.scheme", scheme);
+    if (!host.empty()) payload->set_request_attribute("server.address", host);
+    payload->set_request_attribute("server.port", std::to_string(ap_get_server_port(request)));
+    payload->set_request_attribute("http.request.method", request->method ? request->method : "");
+    const std::string protocol = request->protocol ? request->protocol : "";
+    const auto slash = protocol.find('/');
+    if (slash != std::string::npos)
+        payload->set_request_attribute("network.protocol.version", protocol.substr(slash + 1));
+#ifdef APLOG_USE_MODULE
+    const char* clientAddress = request->useragent_ip;
+#else
+    const char* clientAddress = request->connection ? request->connection->remote_ip : NULL;
+#endif
+    if (clientAddress && *clientAddress)
+        payload->set_request_attribute("client.address", clientAddress);
 
     switch (request->proto_num)
     {  // TODO: consider using ap_get_protocol for other flavors
@@ -1034,6 +956,12 @@ int ApacheHooks::otel_hook_header_parser_begin(request_rec *r)
     // Store the request data into pool
     if (OTEL_ISSUCCESS(res))
     {
+        if (!requestPayload->trace_id.empty())
+        {
+            apr_pool_userdata_set(apr_pstrdup(r->pool, requestPayload->trace_id.c_str()),
+                OTEL_RESPONSE_TRACE_KEY, apr_pool_cleanup_null, r->pool);
+            setResponseTraceId(r);
+        }
         // Store the Request Handle on the request object
         OTEL_SDK_HANDLE_REQ reqHandleValue = (OTEL_SDK_HANDLE_REQ)apr_palloc(r->pool, sizeof(OTEL_SDK_HANDLE_REQ));
 
@@ -1099,6 +1027,7 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
     std::unique_ptr<otel::core::ResponsePayload> responsePayload
         (new otel::core::ResponsePayload);
     responsePayload->status_code = r->status;
+    responsePayload->modern_http_attributes = true;
     otel_cfg* requestConfig = ApacheConfigHandlers::getConfig(r);
     if (!requestConfig || requestConfig->getCaptureResponseHeaders())
     {
@@ -1109,37 +1038,14 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         }
         const auto separateHeaders = separateHeaderNames(
             requestConfig ? requestConfig->getSeparateResponseHeaders() : "");
-        responsePayload->response_attributes["http.response.headers"] =
+        responsePayload->response_attributes["apache.http.response.headers"] =
             headersAsJson(responseHeaders, separateHeaders);
         for (const auto& attribute : separatedHeaderAttributes(
-            responseHeaders, separateHeaders, "http.response.headers."))
+            responseHeaders, separateHeaders, "http.response.header."))
         {
-            responsePayload->response_attributes[attribute.first] = attribute.second;
+            responsePayload->header_attributes[attribute.first] = attribute.second;
         }
     }
-    const std::string proxyAddress = upstreamAddress(r);
-    if (!proxyAddress.empty())
-        responsePayload->response_attributes["http.upstream.address"] = proxyAddress;
-    const std::string proxyTarget = r->filename && !strncmp(r->filename, "proxy:", 6)
-        ? std::string(r->filename + 6)
-        : (requestValue(r, "proxy_target") ? requestValue(r, "proxy_target") : "");
-    if (!proxyTarget.empty())
-    {
-        responsePayload->response_attributes["http.upstream.target"] = proxyTarget;
-        responsePayload->response_attributes["http.proxy.target"] = proxyTarget;
-    }
-    // mod_proxy_http records the backend's actual status under this hyphenated
-    // note. Do not substitute r->status: that can be a locally generated error.
-    const char* upstreamStatus = requestValue(r, "proxy-status");
-    if (!upstreamStatus || !*upstreamStatus) upstreamStatus = requestValue(r, "upstream_status");
-    if (!upstreamStatus || !*upstreamStatus) upstreamStatus = requestValue(r, "proxy_status");
-    if (upstreamStatus && *upstreamStatus)
-        responsePayload->response_attributes["http.upstream.status"] = upstreamStatus;
-    ApacheTracing::writeTrace(r->server, __func__,
-        "upstream target=%s address=%s status=%s",
-        proxyTarget.c_str(),
-        proxyAddress.c_str(),
-        upstreamStatus ? upstreamStatus : "");
 
     if (otel_requestHasErrors(r))
     {

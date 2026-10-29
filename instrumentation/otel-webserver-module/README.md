@@ -84,10 +84,12 @@ headers with the configured propagator's current context, removing stale
 `tracestate` and alternate propagation formats. Ordinary application headers
 remain. Apache generates no custom parent-span header.
 
-`http.upstream.status` reads mod_proxy_http's `proxy-status` note and is omitted
-when no backend status exists. The old `http.upstream.response_time` attribute
-is removed; use span duration. Proxy target attributes copy Apache's actual
-target URL rather than assembling another URL from path fragments.
+Every traced response includes `x-trace-id` with Apache's current trace ID,
+including errors and with propagation injection OFF. Upstream values are replaced.
+Span attributes use current HTTP semantic names without legacy aliases. See
+[the quick reference](README-apache.md) for the complete attribute mapping.
+Upstream URL and status belong to the proxy client span, using `url.full` and
+`http.response.status_code`.
 
 With extraction OFF, Apache reuses the valid incoming trace ID but creates a
 fresh root span (`parent_span_id=0000000000000000`). Its outgoing `traceparent`
@@ -105,24 +107,24 @@ writes can still change headers later.
 #### Separate request and response header attributes
 
 Use these independent directives to move selected headers out of the combined
-`http.request.headers` or `http.response.headers` JSON string:
+`apache.http.request.headers` or `apache.http.response.headers` JSON string:
 
 ```apache
 ApacheModuleSeparateRequestHeaders Authorization,X-Request-ID
 ApacheModuleSeparateResponseHeaders Set-Cookie,X-Response-ID
 ```
 
-The example produces `http.request.headers.authorization`,
-`http.request.headers.x-request-id`, `http.response.headers.set-cookie`, and
-`http.response.headers.x-response-id`. These headers are excluded from the
+The example produces `http.request.header.authorization`,
+`http.request.header.x-request-id`, `http.response.header.set-cookie`, and
+`http.response.header.x-response-id`. These headers are excluded from the
 combined JSON. Only headers selected by these directives get their own header
 attributes. Other captured headers remain solely in the combined JSON; Apache
-no longer emits legacy `http.request.header.<original-name>` attributes.
+never automatically splits unselected headers into attributes.
 
 Lists are comma-separated, case-insensitive, and ignore surrounding whitespace
 and duplicate names. Quote the argument when it contains spaces. Attribute
-suffixes are lowercase. Single values are copied exactly, without added
-newlines. Multiple values are retained as a JSON array string. Headers absent
+suffixes are lowercase. Values use string arrays, including single values, as required by the HTTP
+semantic conventions. Headers absent
 from the request or response do not create an attribute.
 
 Both lists default to empty: no headers are separated unless configured.

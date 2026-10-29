@@ -28,6 +28,8 @@
 #include <log4cxx/logger.h>
 #include <unordered_map>
 #include <sstream>
+#include <opentelemetry/trace/context.h>
+#include <opentelemetry/context/runtime_context.h>
 
 
 namespace otel {
@@ -37,6 +39,16 @@ using namespace sdkwrapper;
 
 constexpr const char* http_request_header = "http.request.header.";
 constexpr const char* http_response_header = "http.response.header.";
+
+static void addHeaderArrays(const std::shared_ptr<IScopedSpan>& span,
+    const std::unordered_map<std::string, std::vector<std::string>>& attributes) {
+    for (const auto& attribute : attributes) {
+        std::vector<opentelemetry::nostd::string_view> values;
+        for (const auto& value : attribute.second) values.emplace_back(value);
+        span->AddAttribute(attribute.first,
+            opentelemetry::nostd::span<const opentelemetry::nostd::string_view>(values.data(), values.size()));
+    }
+}
 
 RequestProcessingEngine::RequestProcessingEngine()
     : mLogger(getLogger(std::string(LogContext::AGENT) + ".RequestProcessingEngine"))
@@ -66,17 +78,19 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startRequest(
 
     std::string spanName = (payload->get_operation_name().empty() ? m_spanNamer->getSpanName(payload->get_uri()) : payload->get_operation_name());
     otel::core::sdkwrapper::OtelKeyValueMap keyValueMap;
-    keyValueMap[kAttrRequestProtocol] = payload->get_request_protocol();
-    keyValueMap[kAttrHTTPServerName] = payload->get_server_name();
-    keyValueMap[kAttrHTTPMethod] = payload->get_http_request_method();
-    keyValueMap[kAttrHTTPScheme] = payload->get_scheme();
-    keyValueMap[kAttrNetHostName] = payload->get_host();
-    keyValueMap[kAttrNETHostPort] = payload->get_port();
-    keyValueMap[kAttrHTTPTarget] =payload->get_target();
-    keyValueMap[kAttrHTTPFlavor] = payload->get_flavor();
-    keyValueMap[kAttrHTTPClientIP] = payload->get_client_ip();
-    keyValueMap[kAttrHTTPUserAgent] = payload->get_user_agent();
-    keyValueMap[kAttrNETPeerPort] = payload->get_peer_port();
+    if (!payload->modern_http_attributes) {
+        keyValueMap[kAttrRequestProtocol] = payload->get_request_protocol();
+        keyValueMap[kAttrHTTPServerName] = payload->get_server_name();
+        keyValueMap[kAttrHTTPMethod] = payload->get_http_request_method();
+        keyValueMap[kAttrHTTPScheme] = payload->get_scheme();
+        keyValueMap[kAttrNetHostName] = payload->get_host();
+        keyValueMap[kAttrNETHostPort] = payload->get_port();
+        keyValueMap[kAttrHTTPTarget] =payload->get_target();
+        keyValueMap[kAttrHTTPFlavor] = payload->get_flavor();
+        keyValueMap[kAttrHTTPClientIP] = payload->get_client_ip();
+        keyValueMap[kAttrHTTPUserAgent] = payload->get_user_agent();
+        keyValueMap[kAttrNETPeerPort] = payload->get_peer_port();
+    }
 
     auto& request_headers = payload->get_request_headers();
     for (auto itr = request_headers.begin(); itr != request_headers.end(); itr++) {
@@ -85,10 +99,21 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startRequest(
         keyValueMap[key] = itr->second;
     }
     for (const auto& attribute : payload->get_request_attributes()) {
-        keyValueMap[attribute.first] = attribute.second;
+        if (payload->modern_http_attributes && attribute.first == "server.port")
+            keyValueMap[attribute.first] = static_cast<int64_t>(std::stol(attribute.second));
+        else
+            keyValueMap[attribute.first] = attribute.second;
     }
 
     auto span = m_sdkWrapper->CreateSpan(spanName, sdkwrapper::SpanKind::SERVER, keyValueMap, payload->get_http_headers());
+    addHeaderArrays(span, payload->header_attributes);
+    const auto spanContext = opentelemetry::trace::GetSpan(
+        opentelemetry::context::RuntimeContext::GetCurrent())->GetContext();
+    if (spanContext.IsValid()) {
+        char traceId[32];
+        spanContext.trace_id().ToLowerBase16(traceId);
+        payload->trace_id.assign(traceId, sizeof(traceId));
+    }
     
     LOG4CXX_TRACE(mLogger, "Span started for context: [" << wscontext
         <<"] SpanName: " << spanName << ", RequestProtocol: " << payload->get_request_protocol()
@@ -153,9 +178,10 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
         LOG4CXX_TRACE(mLogger, "Setting status as error[" << errorStatus <<"] on root Span");
 
     } else {
-        rootSpan->SetStatus(StatusCode::Ok);
+        rootSpan->SetStatus(payload && payload->modern_http_attributes ? StatusCode::Unset : StatusCode::Ok);
     }
     if (payload != nullptr) {
+        addHeaderArrays(rootSpan, payload->header_attributes);
         for (auto itr = payload->response_headers.begin();
             itr != payload->response_headers.end(); itr++) {
             std::string key = std::string(http_response_header) +
@@ -171,7 +197,12 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
             rootSpan->AddAttribute(key, itr->second);
         }
 
-        rootSpan->AddAttribute(kAttrHTTPStatusCode, payload->status_code);
+        if (payload->modern_http_attributes)
+            rootSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->status_code));
+        else
+            rootSpan->AddAttribute(kAttrHTTPStatusCode, payload->status_code);
+        if (payload->modern_http_attributes && payload->status_code >= 500)
+            rootSpan->AddAttribute("error.type", std::to_string(payload->status_code));
     }
 
     LOG4CXX_TRACE(mLogger, "Ending root span with id: " << rootSpan.get());
@@ -205,7 +236,7 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startInteraction(
 
     // TODO : confirm and update name later
     std::string spanName = payload->moduleName + "_" + payload->phaseName;
-    keyValueMap["interactionType"] = "EXIT_CALL";
+    if (!payload->modern_http_attributes) keyValueMap["interactionType"] = "EXIT_CALL";
     // Legacy metadata still used internally by the NGINX adapter.
     std::string parentSpanId = m_sdkWrapper->ReturnCurrentSpanId();
     auto interactionSpan = m_sdkWrapper->CreateSpan(spanName, SpanKind::CLIENT, keyValueMap);
@@ -261,10 +292,23 @@ OTEL_SDK_API OTEL_SDK_STATUS_CODE RequestProcessingEngine::endInteraction(
         } else {
             interactionSpan->SetStatus(StatusCode::Error, payload->errorMsg);
         }
-        interactionSpan->AddAttribute("error_code", payload->errorCode);
+        if (!payload->modern_http_attributes)
+            interactionSpan->AddAttribute("error_code", payload->errorCode);
         LOG4CXX_TRACE(mLogger, "Span updated with error Code: " << payload->errorCode);
     } else {
-        interactionSpan->SetStatus(StatusCode::Ok);
+        interactionSpan->SetStatus(payload->modern_http_attributes ? StatusCode::Unset : StatusCode::Ok);
+    }
+
+    for (const auto& attribute : payload->http_attributes) {
+        if (attribute.first == "server.port")
+            interactionSpan->AddAttribute(attribute.first, static_cast<int64_t>(std::stol(attribute.second)));
+        else
+            interactionSpan->AddAttribute(attribute.first, attribute.second);
+    }
+    if (payload->http_status_code) {
+        interactionSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->http_status_code));
+        if (payload->http_status_code >= 400)
+            interactionSpan->AddAttribute("error.type", std::to_string(payload->http_status_code));
     }
 
     if (!payload->backendName.empty()) {
