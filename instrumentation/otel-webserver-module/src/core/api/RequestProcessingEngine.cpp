@@ -103,7 +103,8 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startRequest(
         keyValueMap[key] = itr->second;
     }
     for (const auto& attribute : payload->get_request_attributes()) {
-        if (payload->modern_http_attributes && attribute.first == "server.port")
+        if (payload->modern_http_attributes &&
+            (attribute.first == "server.port" || attribute.first == "network.peer.port"))
             keyValueMap[attribute.first] = static_cast<int64_t>(std::stol(attribute.second));
         else
             keyValueMap[attribute.first] = attribute.second;
@@ -157,7 +158,10 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
     }
 
     // check for error and set attribute in the scopedSpan.
-    if (error) {
+    if (payload && payload->modern_http_attributes) {
+        const bool failed = payload->status_code >= 500 || !payload->error_type.empty() || (!payload->status_code && error);
+        rootSpan->SetStatus(failed ? StatusCode::Error : StatusCode::Unset);
+    } else if (error) {
         std::stringstream strValue;
         unsigned int errorValue;
 
@@ -193,10 +197,7 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
             rootSpan->AddAttribute(key, itr->second);
         }
         for (const auto& attribute : payload->response_attributes) {
-            if (payload->modern_http_attributes && attribute.first == "http.upstream.status_code")
-                rootSpan->AddAttribute(attribute.first, static_cast<int64_t>(std::stol(attribute.second)));
-            else
-                rootSpan->AddAttribute(attribute.first, attribute.second);
+            rootSpan->AddAttribute(attribute.first, attribute.second);
         }
 
         for (auto itr = payload->otel_attributes.begin(); itr != payload->otel_attributes.end(); itr++) {
@@ -204,12 +205,15 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
             rootSpan->AddAttribute(key, itr->second);
         }
 
-        if (payload->modern_http_attributes)
-            rootSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->status_code));
+        if (payload->modern_http_attributes) {
+            if (payload->status_code)
+                rootSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->status_code));
+        }
         else
             rootSpan->AddAttribute(kAttrHTTPStatusCode, payload->status_code);
-        if (payload->modern_http_attributes && payload->status_code >= 500)
-            rootSpan->AddAttribute("error.type", std::to_string(payload->status_code));
+        if (payload->modern_http_attributes && (!payload->error_type.empty() || payload->status_code >= 500))
+            rootSpan->AddAttribute("error.type", payload->error_type.empty()
+                ? std::to_string(payload->status_code) : payload->error_type);
     }
 
     LOG4CXX_TRACE(mLogger, "Ending root span with id: " << rootSpan.get());
@@ -243,14 +247,21 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startInteraction(
 
     // TODO : confirm and update name later
     std::string spanName = payload->moduleName + "_" + payload->phaseName;
+    if (!payload->span_name.empty()) spanName = payload->span_name;
+    for (const auto& attribute : payload->attributes) keyValueMap[attribute.first] = attribute.second;
+    for (const auto& attribute : payload->numeric_attributes) keyValueMap[attribute.first] = attribute.second;
     if (!payload->modern_http_attributes) keyValueMap["interactionType"] = "EXIT_CALL";
     // Legacy metadata still used internally by the NGINX adapter.
     std::string parentSpanId = m_sdkWrapper->ReturnCurrentSpanId();
-    auto interactionSpan = m_sdkWrapper->CreateSpan(spanName, SpanKind::CLIENT, keyValueMap);
+    const SpanKind kind = payload->modern_http_attributes && !payload->http_client
+        ? SpanKind::INTERNAL : SpanKind::CLIENT;
+    auto interactionSpan = m_sdkWrapper->CreateSpan(spanName, kind, keyValueMap);
     LOG4CXX_TRACE(mLogger, "Client Span started with SpanName: " << spanName
         << " Span Id: " << interactionSpan.get());
-    m_sdkWrapper->PopulatePropagationHeaders(propagationHeaders);
-    propagationHeaders["Parent_Span_Id"] = parentSpanId;
+    if (kind == SpanKind::CLIENT) {
+        m_sdkWrapper->PopulatePropagationHeaders(propagationHeaders);
+        if (!payload->modern_http_attributes) propagationHeaders["Parent_Span_Id"] = parentSpanId;
+    }
 
     // Add the interaction to the request context.
     requestContext->addInteraction(interactionSpan);
@@ -283,6 +294,24 @@ OTEL_SDK_API OTEL_SDK_STATUS_CODE RequestProcessingEngine::endInteraction(
     }
 
     auto interactionSpan = rContext->lastActiveInteraction();
+
+    if (payload->modern_http_attributes) {
+        for (const auto& attribute : payload->attributes)
+            interactionSpan->AddAttribute(attribute.first, attribute.second);
+        for (const auto& attribute : payload->numeric_attributes)
+            interactionSpan->AddAttribute(attribute.first, attribute.second);
+        const bool failed = payload->http_client &&
+            (payload->http_status_code >= 400 || !payload->error_type.empty());
+        interactionSpan->SetStatus(failed ? StatusCode::Error : StatusCode::Unset);
+        if (payload->http_status_code)
+            interactionSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->http_status_code));
+        if (failed)
+            interactionSpan->AddAttribute("error.type", payload->error_type.empty()
+                ? std::to_string(payload->http_status_code) : payload->error_type);
+        interactionSpan->End();
+        rContext->removeInteraction();
+        return OTEL_SUCCESS;
+    }
 
     // If errorCode is 0 or errMsg is empty, there is no error.
     bool isError = payload->errorCode != 0 && !payload->errorMsg.empty();

@@ -23,8 +23,11 @@ import json
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 class Echo(BaseHTTPRequestHandler):
     def do_GET(self):
-        data = json.dumps(list(self.headers.items()) + [('X-Echo-Path', self.path)])
-        status = 503 if self.path.startswith('/status/503') else 200
+        data = json.dumps(list(self.headers.items()) + [('X-Echo-Path', self.path), ('X-Echo-Protocol', self.request_version)])
+        import time
+        if self.path.startswith('/slow/'):
+            time.sleep(0.15)
+        status = 503 if self.path.startswith('/status/503') else (404 if self.path.startswith('/status/404') else 200)
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
@@ -106,21 +109,35 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 allowed = {
                     "network.protocol.version", "server.address", "server.port", "http.request.method",
                     "url.path", "url.query", "url.scheme", "http.response.status_code",
-                    "http.request.headers", "http.response.headers", "http.upstream.status_code",
-                    "http.upstream.url", "error.type",
+                    "http.request.headers", "http.response.headers", "error.type", "http.request.method_original",
+                    "client.address", "network.peer.address", "network.peer.port", "user_agent.original",
                 }
                 attributes = root_block.split("  attributes    :")[1].split("  events")[0]
                 names = set(re.findall(r"(?m)^\t([^:\n]+):", attributes))
                 unexpected = {name for name in names if name not in allowed
                               and not name.startswith(("http.request.header.", "http.response.header."))}
                 assert not unexpected, unexpected
-                required = allowed - {"http.upstream.url", "http.upstream.status_code", "error.type"}
+                required = allowed - {"error.type", "http.request.method_original"}
                 assert required <= names, (required - names, root_block)
                 assert "url.query: propagation-test=" + marker in attributes
+                assert root_block.lstrip().startswith(": GET\n"), root_block
+                assert "url.full:" not in attributes and "http.upstream." not in logs
+                client_allowed = {"server.address", "server.port", "url.full", "http.request.method",
+                                  "http.request.method_original", "http.response.status_code", "error.type",
+                                  "network.protocol.version", "network.peer.address", "network.peer.port"}
+                clients = []
                 for block in logs.split("{\n  name")[1:]:
+                    attrs = block.split("  attributes    :")[1].split("  events")[0]
+                    fields = set(re.findall(r"(?m)^\t([^:\n]+):", attrs))
                     if "span kind     : Client" in block:
-                        attributes = block.split("  attributes    :")[1].split("  events")[0]
-                        assert not re.search(r"(?m)^\t[^:\n]+:", attributes), block
+                        clients.append(block)
+                        assert fields <= client_allowed, (fields - client_allowed, block)
+                        assert {"server.address", "server.port", "url.full", "http.request.method"} <= fields, block
+                        assert block.lstrip().startswith(": GET\n"), block
+                        assert "parent_span_id: " + root["span_id"] in block, block
+                    elif "span kind     : Internal" in block:
+                        assert not fields and "status        : Unset" in block, block
+                assert len(clients) <= 1, clients
                 return response, spans, logs
         assert not traced, "No exported span for " + path
         return response, [], logs
@@ -143,7 +160,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 parents = [value for key, value in pairs if key == "traceparent"]
                 assert not any(key == "parent_span_id" for key, _ in pairs), pairs
                 root = next(span for span in spans if span["span kind"] == "Server")
-                assert re.search(r"(?m)^\s*http\.upstream\.status_code: 200$", logs), logs
+                assert re.search(r"(?m)^\s*http\.response\.status_code: 200$", logs), logs
                 assert "http.upstream.response_time:" not in logs
                 assert root["parent_span_id"] == ("2222222222222222" if extract and incoming else "0000000000000000"), root
                 if incoming:
@@ -240,22 +257,37 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
         response, _, logs = request("/services/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("/dxl/poq/stuff?") and "//" not in received_path, received_path
-        for key in ["http.upstream.url"]:
+        for key in ["url.full"]:
             match = re.search(r"(?m)^\s*" + re.escape(key) + r": (.*)$", logs)
             assert match and match.group(1) == "http://127.0.0.1:8765" + received_path, logs
         print("PASS: stripped /services prefix preserves the exact nested backend URL without adding slashes")
 
         response, _, logs = request("/named/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
-        assert "http.upstream.url: http://localhost:8765" + received_path in logs, logs
+        assert "url.full: http://localhost:8765" + received_path in logs, logs
         print("PASS: configured backend DNS hostname is retained without reverse DNS")
 
         _, _, logs = request("/services/status/503")
-        root_block = next(block for block in logs.split("{\n  name")[1:]
-                          if "span kind     : Server" in block)
-        assert re.search(r"(?m)^\s*http\.upstream\.status_code: 503$", root_block), logs
+        for kind in ["Server", "Client"]:
+            block = next(block for block in logs.split("{\n  name")[1:] if "span kind     : " + kind in block)
+            assert re.search(r"(?m)^\s*http\.response\.status_code: 503$", block), block
+            assert "status        : Error" in block and "error.type: 503" in block, block
         assert "http.upstream.response_time:" not in logs
         print("PASS: real upstream 503 response is recorded")
+
+        _, _, logs = request("/services/status/404")
+        for kind, status in [("Server", "Unset"), ("Client", "Error")]:
+            block = next(block for block in logs.split("{\n  name")[1:] if "span kind     : " + kind in block)
+            assert "http.response.status_code: 404" in block and "status        : " + status in block, block
+            assert ("error.type: 404" in block) == (kind == "Client"), block
+        print("PASS: backend 404 marks CLIENT error while SERVER status stays unset")
+
+        _, _, logs = request("/services/slow/echo")
+        block = next(block for block in logs.split("{\n  name")[1:] if "span kind     : Client" in block)
+        duration = int(re.search(r"duration\s*:\s*(\d+)", block).group(1))
+        assert duration >= 150000000, block
+        assert "network.peer.address: 127.0.0.1" in block and "network.peer.port: 8765" in block, block
+        print("PASS: proxy CLIENT span covers backend delay and records actual connected IP/port")
 
         for path in ["/services/unavailable/echo", "/local-missing"]:
             _, _, logs = request(path)
@@ -263,12 +295,15 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
             for block in logs.split("{\n  name")[1:]:
                 if "span kind     : Client" in block:
                     assert "http.response.status_code:" not in block, block
+                    assert "status        : Error" in block and "error.type: proxy_error" in block, block
+            if path == "/local-missing":
+                assert not any(span["span kind"] == "Client" for span in span_records(logs)), logs
         print("PASS: failed connections and local responses omit nonexistent upstream status")
 
         response, _, logs = request("/badjoin/dxl/poq/stuff")
         received_path = dict(json.loads(response))["X-Echo-Path"]
         assert received_path.startswith("//dxl/poq/stuff?"), received_path
-        assert "http.upstream.url: http://127.0.0.1:8765" + received_path in logs
+        assert "url.full: http://127.0.0.1:8765" + received_path in logs
         print("PASS: mismatched ProxyPass slashes reproduce // on the wire (telemetry faithfully reports it)")
 
         # Cold-start concurrency: one process and batch export keep console

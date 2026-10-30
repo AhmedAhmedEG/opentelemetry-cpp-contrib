@@ -122,7 +122,7 @@ SSLProxyCheckPeerCN off
                         break
                     time.sleep(0.1)
                 expected_url = 'https://' + (backend_host if ':' in backend_host else backend_host + ':8765') + pairs['x-echo-path']
-                match = re.search(r'(?m)^\s*http\.upstream\.url: (.*)$', logs)
+                match = re.search(r'(?m)^\s*url\.full: (.*)$', logs)
                 assert match and match.group(1) == expected_url, logs
                 spans = span_records(logs)
                 root = next(span for span in spans if span.get('span kind') == 'Server')

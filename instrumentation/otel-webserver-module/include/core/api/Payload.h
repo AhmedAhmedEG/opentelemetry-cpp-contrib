@@ -19,6 +19,7 @@
 
 #include <unordered_map>
 #include <vector>
+#include <cstdint>
 #include "sdkwrapper/SdkConstants.h"
 
 namespace otel {
@@ -116,6 +117,7 @@ public:
 struct ResponsePayload
 {
     bool modern_http_attributes = false;
+    std::string error_type;
     std::unordered_map<std::string, std::vector<std::string>> header_attributes;
 	std::unordered_map<std::string, std::string> response_headers;
     std::unordered_map<std::string, std::string> response_attributes;
@@ -126,6 +128,10 @@ struct ResponsePayload
 struct InteractionPayload
 {
     bool modern_http_attributes = false;
+    bool http_client = false;
+    std::string span_name;
+    std::unordered_map<std::string, std::string> attributes;
+    std::unordered_map<std::string, int64_t> numeric_attributes;
 	// Endpoint
 	std::string moduleName;
 	std::string phaseName;
@@ -140,6 +146,11 @@ struct InteractionPayload
 struct EndInteractionPayload
 {
     bool modern_http_attributes = false;
+    bool http_client = false;
+    unsigned int http_status_code = 0;
+    std::string error_type;
+    std::unordered_map<std::string, std::string> attributes;
+    std::unordered_map<std::string, int64_t> numeric_attributes;
 	std::string backendName;
 	std::string backendType;
 

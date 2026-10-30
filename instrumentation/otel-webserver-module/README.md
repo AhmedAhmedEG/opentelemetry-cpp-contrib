@@ -88,10 +88,14 @@ Every traced response includes `x-trace-id` with Apache's current trace ID,
 including errors and with propagation injection OFF. Upstream values are replaced.
 Span attributes use current HTTP semantic names without legacy aliases. See
 [the quick reference](README-apache.md) for the complete attribute mapping.
-Upstream URL and actual backend status stay on the root span as
-`http.upstream.url` and integer `http.upstream.status_code`. The root uses only
-the agreed attribute list documented in the quick reference; client spans do
-not duplicate those fields.
+Apache's incoming span is SERVER and local module/stage spans are INTERNAL.
+The actual HTTP(S) mod_proxy handler is one CLIENT span, directly parented to
+the SERVER span. Backend information uses standard `server.address`,
+`server.port`, `url.full`, `http.response.status_code` and available connection
+attributes on that CLIENT span. Its active context is propagated downstream.
+HTTP span names use the method, not a raw path; SERVER request paths remain in
+`url.path`. No custom upstream aliases are emitted. See the quick reference
+for status rules, URL sanitization, attributes and the retained custom headers.
 
 With extraction OFF, Apache reuses the valid incoming trace ID but creates a
 fresh root span (`parent_span_id=0000000000000000`). Its outgoing `traceparent`

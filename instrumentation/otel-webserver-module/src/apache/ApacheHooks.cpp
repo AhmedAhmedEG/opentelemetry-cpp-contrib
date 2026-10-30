@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -71,6 +72,87 @@ const char* const OTEL_RESPONSE_TRACE_KEY = "otel_response_trace_id";
 const char* const OTEL_INCOMING_HOST_KEY = "otel_incoming_host";
 const char* const OTEL_BACKEND_HOST_KEY = "otel_backend_host";
 const char* const OTEL_UPSTREAM_URL_KEY = "otel_upstream_url";
+const char* const OTEL_HTTP_CLIENT_KEY = "otel_http_client";
+int (*originalProxyHandler)(request_rec*) = NULL;
+
+std::string httpMethod(const char* method)
+{
+    const std::string original = method ? method : "";
+    const char* configured = std::getenv("OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS");
+    const std::string known = configured ? configured : "CONNECT,DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT,TRACE,QUERY";
+    std::istringstream list(known);
+    std::string candidate;
+    while (std::getline(list, candidate, ','))
+    {
+        const auto start = candidate.find_first_not_of(" \t");
+        const auto end = candidate.find_last_not_of(" \t");
+        if (start != std::string::npos && candidate.substr(start, end - start + 1) == original)
+            return original;
+    }
+    return "_OTHER";
+}
+
+std::string httpSpanName(const char* method)
+{
+    const std::string normalized = httpMethod(method);
+    return normalized == "_OTHER" ? "HTTP" : normalized;
+}
+
+std::string sanitizedQuery(const std::string& query)
+{
+    static const std::unordered_set<std::string> sensitive = {
+        "X-Amz-Signature", "X-Amz-Credential", "X-Amz-Security-Token", "sig", "X-Goog-Signature"};
+    std::string result;
+    size_t start = 0;
+    while (start < query.size())
+    {
+        const size_t end = query.find('&', start);
+        const std::string parameter = query.substr(start, end == std::string::npos ? end : end - start);
+        const size_t equals = parameter.find('=');
+        const std::string name = parameter.substr(0, equals);
+        result += sensitive.count(name) && equals != std::string::npos
+            ? name + "=REDACTED" : parameter;
+        if (end == std::string::npos) break;
+        result += '&';
+        start = end + 1;
+    }
+    return result;
+}
+
+std::string sanitizedUrl(std::string url)
+{
+    const size_t scheme = url.find("://");
+    if (scheme != std::string::npos)
+    {
+        const size_t end = url.find_first_of("/?#", scheme + 3);
+        const size_t credentials = url.find('@', scheme + 3);
+        if (credentials != std::string::npos && (end == std::string::npos || credentials < end))
+            url.replace(scheme + 3, credentials - scheme - 3, "REDACTED:REDACTED");
+    }
+    const size_t question = url.find('?');
+    if (question != std::string::npos)
+    {
+        const size_t fragment = url.find('#', question);
+        url.replace(question + 1, fragment == std::string::npos ? std::string::npos : fragment - question - 1,
+            sanitizedQuery(url.substr(question + 1, fragment == std::string::npos ? fragment : fragment - question - 1)));
+    }
+    return url;
+}
+
+int captureProxyConnection(request_rec* request, request_rec* backendResponse)
+{
+    if (!backendResponse || !backendResponse->connection) return DECLINED;
+#ifdef APLOG_USE_MODULE
+    const char* address = backendResponse->connection->client_ip;
+    const apr_sockaddr_t* peer = backendResponse->connection->client_addr;
+#else
+    const char* address = backendResponse->connection->remote_ip;
+    const apr_sockaddr_t* peer = backendResponse->connection->remote_addr;
+#endif
+    if (address) apr_table_set(request->notes, "otel_backend_peer", address);
+    if (peer) apr_table_set(request->notes, "otel_backend_port", apr_itoa(request->pool, peer->port));
+    return DECLINED;
+}
 
 void* requestPoolValue(request_rec* request, const char* key)
 {
@@ -129,6 +211,25 @@ std::string upstreamUrl(request_rec* request)
         (end == std::string::npos ? "" : target.substr(end));
 }
 
+void clientRequestAttributes(request_rec* request,
+    std::unordered_map<std::string, std::string>& attributes,
+    std::unordered_map<std::string, int64_t>& numbers)
+{
+    const char* captured = static_cast<const char*>(requestPoolValue(request, OTEL_UPSTREAM_URL_KEY));
+    const std::string target = captured ? captured : upstreamUrl(request);
+    if (!target.empty()) attributes["url.full"] = sanitizedUrl(target);
+    attributes["http.request.method"] = httpMethod(request->method);
+    if (attributes["http.request.method"] == "_OTHER" && request->method)
+        attributes["http.request.method_original"] = request->method;
+    apr_uri_t uri;
+    if (apr_uri_parse(request->pool, target.c_str(), &uri) == APR_SUCCESS && uri.hostname)
+    {
+        attributes["server.address"] = uri.hostname;
+        const apr_port_t port = uri.port ? uri.port : apr_uri_port_of_scheme(uri.scheme);
+        if (port) numbers["server.port"] = port;
+    }
+}
+
 void setResponseTraceId(request_rec* request)
 {
     void* stored = NULL;
@@ -152,10 +253,13 @@ void clearTraceHeaders(request_rec* request)
 
 void ApacheHooks::registerHooks(apr_pool_t *p)
 {
+    ap_hook_post_config(otel_post_config, NULL, NULL, APR_HOOK_REALLY_LAST + 2);
     // mod_proxy calls this optional hook immediately before serializing
     // HTTP(S) request headers. No hard dependency on mod_proxy is introduced.
     apr_optional_hook_add("fixups", reinterpret_cast<void (*)(void)>(otel_proxy_fixups),
         NULL, NULL, APR_HOOK_REALLY_LAST + 2);
+    apr_optional_hook_add("create_req", reinterpret_cast<void (*)(void)>(captureProxyConnection),
+        NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_fixups(captureBackendHost, NULL, NULL, APR_HOOK_REALLY_LAST + 2);
     // Place a hook that executes when a child process is spawned
     // (commonly used for initializing modules after the server has forked)
@@ -277,6 +381,54 @@ void ApacheHooks::registerHooks(apr_pool_t *p)
             "log_transaction");
 }
 
+int ApacheHooks::otel_post_config(apr_pool_t*, apr_pool_t*, apr_pool_t*, server_rec*)
+{
+    // Replace the callback itself. Separate before/after hook entries cannot
+    // reliably bracket a RUN_FIRST handler, especially with equal priorities.
+    const apr_array_header_t* hooks = ap_hook_get_handler();
+    if (!hooks) return OK;
+    auto entries = reinterpret_cast<ap_LINK_handler_t*>(hooks->elts);
+    for (int i = 0; i < hooks->nelts; ++i)
+        if (entries[i].szName && !strcmp(entries[i].szName, "mod_proxy.c") &&
+            entries[i].pFunc != otel_proxy_handler)
+        {
+            originalProxyHandler = entries[i].pFunc;
+            entries[i].pFunc = otel_proxy_handler;
+        }
+    return OK;
+}
+
+int ApacheHooks::otel_proxy_handler(request_rec* request)
+{
+    if (!originalProxyHandler) return DECLINED;
+    const std::string target = upstreamUrl(request);
+    auto handle = static_cast<OTEL_SDK_HANDLE_REQ>(const_cast<char*>(apr_table_get(request->notes, OTEL_REQ_HANDLE_KEY)));
+    if (!handle || (target.compare(0, 7, "http://") && target.compare(0, 8, "https://")))
+        return originalProxyHandler(request);
+    otel_stopInteraction(request, true, false);
+    otel::core::InteractionPayload payload("mod_proxy.c", "handler", false);
+    payload.modern_http_attributes = true;
+    payload.http_client = true;
+    payload.span_name = httpSpanName(request->method);
+    apr_pool_userdata_set(apr_pstrdup(request->pool, target.c_str()), OTEL_UPSTREAM_URL_KEY,
+        apr_pool_cleanup_null, request->pool);
+    for (const char* note : {"proxy-status", "proxy_timedout", "otel_backend_peer",
+            "otel_backend_port", "otel_backend_protocol", "otel_proxy_result"})
+        apr_table_unset(request->notes, note);
+    clientRequestAttributes(request, payload.attributes, payload.numeric_attributes);
+    std::unordered_map<std::string, std::string> propagation;
+    const auto started = wsAgent.startInteraction(handle, &payload, propagation);
+    if (OTEL_ISFAIL(started)) return originalProxyHandler(request);
+    apr_table_setn(request->notes, OTEL_HTTP_CLIENT_KEY, "1");
+    if (!propagation.empty()) otel_payload_decorator(request, propagation);
+    const int result = originalProxyHandler(request);
+    apr_table_set(request->notes, "otel_proxy_result", apr_itoa(request->pool, result));
+    apr_table_setn(request->notes, "otel_proxy_completing", "1");
+    otel_stopInteraction(request, true, false);
+    apr_table_unset(request->notes, "otel_proxy_completing");
+    return result;
+}
+
 apr_status_t ApacheHooks::otel_output_filter(ap_filter_t* f, apr_bucket_brigade* bb)
 {
     setResponseTraceId(f->r);
@@ -299,6 +451,8 @@ apr_status_t ApacheHooks::otel_output_filter(ap_filter_t* f, apr_bucket_brigade*
 // end the interaction
 void ApacheHooks::otel_stopInteraction(request_rec *r, bool isAlwaysRunStage, bool ignoreBackend)
 {
+    if (r && apr_table_get(r->notes, OTEL_HTTP_CLIENT_KEY) &&
+        !apr_table_get(r->notes, "otel_proxy_completing")) return;
     if ((!isAlwaysRunStage && !m_reportAllStages) || !r || !r->notes || !ap_is_initial_req(r))
     {
         return;
@@ -320,7 +474,26 @@ void ApacheHooks::otel_stopInteraction(request_rec *r, bool isAlwaysRunStage, bo
         std::unique_ptr<otel::core::EndInteractionPayload> payload(new
             otel::core::EndInteractionPayload(backendName, backendType, errorCode, oss.str()));
         payload->modern_http_attributes = true;
+        payload->http_client = apr_table_get(r->notes, OTEL_HTTP_CLIENT_KEY) != NULL;
+        if (payload->http_client)
+        {
+            clientRequestAttributes(r, payload->attributes, payload->numeric_attributes);
+            const char* status = apr_table_get(r->notes, "proxy-status");
+            if (status && atoi(status) >= 100 && atoi(status) <= 599)
+                payload->http_status_code = atoi(status);
+            const char* result = apr_table_get(r->notes, "otel_proxy_result");
+            if (apr_table_get(r->notes, "proxy_timedout")) payload->error_type = "timeout";
+            else if (!payload->http_status_code && (r->status >= 400 || (result && atoi(result) >= 400)))
+                payload->error_type = "proxy_error";
+            const char* peer = apr_table_get(r->notes, "otel_backend_peer");
+            const char* port = apr_table_get(r->notes, "otel_backend_port");
+            const char* protocol = apr_table_get(r->notes, "otel_backend_protocol");
+            if (peer) payload->attributes["network.peer.address"] = peer;
+            if (port) payload->numeric_attributes["network.peer.port"] = atoi(port);
+            if (protocol) payload->attributes["network.protocol.version"] = protocol;
+        }
         OTEL_SDK_STATUS_CODE res = wsAgent.endInteraction(reqHandlePtr, ignoreBackend, payload.get());
+        apr_table_unset(r->notes, OTEL_HTTP_CLIENT_KEY);
 
         if (OTEL_ISFAIL(res))
         {
@@ -341,6 +514,7 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
         Retrieve the stage and module name from endpointIndex and start an interaction to module.
     */
     OTEL_SDK_STATUS_CODE res = OTEL_SUCCESS;
+    if (r && apr_table_get(r->notes, OTEL_HTTP_CLIENT_KEY)) return res;
     if ((!isAlwaysRunStage && !m_reportAllStages) || !r || !r->notes || !ap_is_initial_req(r))
     {
         return res;
@@ -365,7 +539,6 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
         std::unique_ptr<otel::core::InteractionPayload> payload(new
             otel::core::InteractionPayload(module, stage, resolveBackends));
         payload->modern_http_attributes = true;
-
         // Create propagationHeaders to be populated in startInteraction.
         std::unordered_map<std::string, std::string> propagationHeaders;
         res = wsAgent.startInteraction(reqHandlePtr, payload.get(), propagationHeaders);
@@ -377,11 +550,6 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
             if (!propagationHeaders.empty())
             {
                 otel_payload_decorator(r, propagationHeaders);
-            }
-            else
-            {
-                ApacheTracing::writeTrace(r->server, module.c_str(),
-                    "propagationHeaders were not filled, cannot add correlation information into request headers");
             }
             ApacheTracing::writeTrace(r->server, module.c_str(), "interaction begin successful");
         }
@@ -448,6 +616,11 @@ int ApacheHooks::otel_proxy_fixups(request_rec* request)
             apr_pool_userdata_set(apr_pstrdup(owner->pool, target.c_str()), OTEL_UPSTREAM_URL_KEY,
                 apr_pool_cleanup_null, owner->pool);
     }
+    // mod_proxy_http has constructed the outgoing HTTP/1.x request line by
+    // this point; never copy the unrelated inbound request protocol.
+    if (apr_table_get(request->notes, OTEL_HTTP_CLIENT_KEY))
+        apr_table_setn(request->notes, "otel_backend_protocol",
+            apr_table_get(request->subprocess_env, "force-proxy-request-1.0") ? "1.0" : "1.1");
     otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
     if (cfg && !cfg->getOtelPropagatorInject()) return DECLINED;
 
@@ -897,7 +1070,7 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     if (captureQuery)
     {
         if (request->args && *request->args)
-            payload->set_request_attribute("url.query", request->args);
+            payload->set_request_attribute("url.query", sanitizedQuery(request->args));
     }
 
     // http_request_method
@@ -926,12 +1099,37 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
     payload->set_request_attribute("url.path", route);
     payload->set_request_attribute("url.scheme", scheme);
     if (!host.empty()) payload->set_request_attribute("server.address", host);
-    payload->set_request_attribute("server.port", std::to_string(ap_get_server_port(request)));
-    payload->set_request_attribute("http.request.method", request->method ? request->method : "");
+    const char* authority = apr_table_get(request->headers_in, "Host");
+    apr_uri_t incoming;
+    const std::string incomingUrl = scheme + "://" + (authority ? authority : host) + "/";
+    const bool parsed = apr_uri_parse(request->pool, incomingUrl.c_str(), &incoming) == APR_SUCCESS;
+    payload->set_request_attribute("server.port", std::to_string(parsed && incoming.port
+        ? incoming.port : ap_get_server_port(request)));
+    payload->set_request_attribute("http.request.method", httpMethod(request->method));
+    if (httpMethod(request->method) == "_OTHER" && request->method)
+        payload->set_request_attribute("http.request.method_original", request->method);
     const std::string protocol = request->protocol ? request->protocol : "";
     const auto slash = protocol.find('/');
     if (slash != std::string::npos)
-        payload->set_request_attribute("network.protocol.version", protocol.substr(slash + 1));
+    {
+        const std::string version = protocol.substr(slash + 1);
+        payload->set_request_attribute("network.protocol.version",
+            version == "2.0" ? "2" : (version == "3.0" ? "3" : version));
+    }
+#ifdef APLOG_USE_MODULE
+    const char* client = request->useragent_ip;
+    const char* peer = request->connection->client_ip;
+    const apr_sockaddr_t* peerAddress = request->connection->client_addr;
+#else
+    const char* client = request->connection->remote_ip;
+    const char* peer = request->connection->remote_ip;
+    const apr_sockaddr_t* peerAddress = request->connection->remote_addr;
+#endif
+    if (client) payload->set_request_attribute("client.address", client);
+    if (peer) payload->set_request_attribute("network.peer.address", peer);
+    if (peerAddress) payload->set_request_attribute("network.peer.port", std::to_string(peerAddress->port));
+    const char* userAgent = apr_table_get(request->headers_in, "User-Agent");
+    if (userAgent) payload->set_request_attribute("user_agent.original", userAgent);
 
     switch (request->proto_num)
     {  // TODO: consider using ap_get_protocol for other flavors
@@ -954,8 +1152,7 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 #endif
 
     payload->set_port(ap_default_port(request));
-    const std::string operationName = (request->method ? std::string(request->method) : "")
-        + " " + (request->parsed_uri.path ? request->parsed_uri.path : "");
+    const std::string operationName = httpSpanName(request->method);
     payload->set_operation_name(operationName.c_str());
 }
 // We have to use this hook if we want to use directory level configuration.
@@ -1090,6 +1287,7 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         (new otel::core::ResponsePayload);
     responsePayload->status_code = r->status;
     responsePayload->modern_http_attributes = true;
+    if (r->connection->aborted) responsePayload->error_type = "connection_aborted";
     otel_cfg* requestConfig = ApacheConfigHandlers::getConfig(r);
     if (!requestConfig || requestConfig->getCaptureResponseHeaders())
     {
@@ -1107,18 +1305,6 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         {
             responsePayload->header_attributes[attribute.first] = attribute.second;
         }
-    }
-
-    const char* capturedTarget = static_cast<const char*>(requestPoolValue(r, OTEL_UPSTREAM_URL_KEY));
-    const std::string target = capturedTarget ? capturedTarget : upstreamUrl(r);
-    if (!target.empty()) responsePayload->response_attributes["http.upstream.url"] = target;
-    // Record an actual backend response, never substitute Apache's own status.
-    const char* upstreamStatus = apr_table_get(r->notes, "proxy-status");
-    if (upstreamStatus && *upstreamStatus)
-    {
-        const int status = atoi(upstreamStatus);
-        if (status >= 100 && status <= 599)
-            responsePayload->response_attributes["http.upstream.status_code"] = std::to_string(status);
     }
 
     if (otel_requestHasErrors(r))
@@ -1809,6 +1995,8 @@ void ApacheHooksForStage::insertHooksForStage(
 
     for (auto it = hooksNeeded.begin(); it != hooksNeeded.end(); it++)
     {
+        // The proxy handler is instrumented by its callback wrapper instead.
+        if (stage == "handler" && it->module == "mod_proxy.c") continue;
         if (hookCount < beginHandlers.size())
         {
             HookContainer::getInstance().addHook(indexes[hookCount], stage, it->module, it->order);

@@ -36,6 +36,8 @@ public:
     static const int CONFIG_COUNT = 18; // Number of key value pairs in config
     static const std::initializer_list<const char*> httpHeaders;
     static void registerHooks(apr_pool_t *p);
+    static int otel_post_config(apr_pool_t*, apr_pool_t*, apr_pool_t*, server_rec*);
+    static int otel_proxy_handler(request_rec*);
 
     friend class ApacheHooksForStage;
 

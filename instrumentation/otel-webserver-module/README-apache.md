@@ -40,7 +40,7 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `OtelExportTimeoutMillis` | Milliseconds; accepted but not applied. |
 | `OtelMaxExportBatchSize` | Integer; accepted but not applied. |
 | `ResolveBackends` | `ON` / `OFF`: resolve instrumented backends. |
-| `ReportAllInstrumentedModules` | `ON`: all instrumented stages; `OFF`: handler stages. |
+| `ReportAllInstrumentedModules` | `ON`: instrumented INTERNAL stages plus proxy CLIENT; `OFF`: handler stages plus proxy CLIENT. |
 | `TraceAsError` | `ON`: diagnostics at error level; `OFF`: normal trace level. |
 | `CaptureRequestHeaders` | `ON` / `OFF`: combined and separated request attributes. |
 | `CaptureResponseHeaders` | `ON` / `OFF`: combined and separated response attributes. |
@@ -48,7 +48,7 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `SeparateRequestHeaders` | Comma-separated names; default empty; `""` clears. |
 | `SeparateResponseHeaders` | Comma-separated names; default empty; `""` clears. |
 | `TraceRoutes` | Comma-separated paths and all descendants; trailing slashes allowed. Omit or use `/` for all routes. |
-| `SegmentType` | `FIRST`, `LAST`, `CUSTOM`; bypassed by Apache's METHOD/path name. |
+| `SegmentType` | `FIRST`, `LAST`, `CUSTOM`; bypassed by Apache's method-only HTTP name. |
 | `SegmentParameter` | Segment count or indexes; also bypassed for Apache root names. |
 | `MaskCookie` | `ON` / `OFF`; legacy setting, currently unused. |
 | `CookieMatchPattern` | Cookie pattern; currently unused. |
@@ -107,42 +107,74 @@ Unselected headers remain in custom `http.request.headers` and
 `http.response.headers` JSON strings. Capture OFF suppresses both forms
 without disabling propagation or `x-trace-id`.
 
-Root names remain `METHOD /full/path`, excluding the query. The root span
-emits only these attributes when their values are available:
+HTTP span semantics follow the [OpenTelemetry HTTP conventions](https://opentelemetry.io/docs/specs/semconv/http/http-spans/).
+Apache's incoming span is SERVER. Its name is the known HTTP method (for
+example `GET`), or `HTTP` for an unknown method. Raw paths are attributes,
+not span names or invented route templates. `OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS`
+can override the known-method list using comma-separated, case-sensitive names.
+
+The SERVER span records these standard fields when available:
 
 ```text
-network.protocol.version
+http.request.method
+http.request.method_original    # only for an unknown/noncanonical method
+http.response.status_code
+url.path
+url.query                     # raw query string; omitted when capture is OFF
+url.scheme
 server.address
 server.port
-http.request.method
-url.path
-url.query
-url.scheme
-http.response.status_code
-http.request.headers
-http.response.headers
-http.upstream.status_code
-http.upstream.url
+network.protocol.version
+client.address
+network.peer.address
+network.peer.port
+user_agent.original
+error.type                    # HTTP 5xx or an observed connection failure
 ```
 
-`server.port`, `http.response.status_code` and `http.upstream.status_code` are
-integers. `url.query` is the raw query string, not JSON; capture OFF omits it.
-Combined header values are pretty-printed JSON strings. The combined-header
-and `http.upstream.*` attributes are custom conventions. Selected headers add
-only `http.request.header.<lowercase>` / `http.response.header.<lowercase>`
-attributes (plain strings for one value; string arrays for repeated values). `error.type` is added for HTTP 5xx errors.
+Your custom `http.request.headers` / `http.response.headers` pretty JSON and
+explicitly selected `http.request.header.*` / `http.response.header.*` fields
+stay on the SERVER span. Capture controls affect these custom/selected fields;
+standard User-Agent and network attributes remain independent.
 
-Upstream details stay on the root span: status is the actual backend response
-from mod_proxy_http's `proxy-status` note, and URL is Apache's actual proxy
-URL. If the proxy target is an IP and a `RequestHeader set Host` override
-provides a hostname, that logical hostname is used in the recorded URL. An
-explicit Host port wins; otherwise the target port is retained. DNS target
-names stay intact. With no configured hostname, the target IP is kept: the
-module does not guess a hostname using reverse DNS. This changes telemetry
-only; proxy routing and wire headers are unchanged. Missing values are omitted. Paths are not joined or normalized by the
-module. Client spans retain trace relationships and timing without duplicating
-these attributes. The root does not emit `client.address`, legacy aliases,
-`url.full`, decoded query JSON, or `http.route` without a known route template.
+The actual `mod_proxy` HTTP(S) handler is wrapped once as a CLIENT span named
+with the HTTP method. This reuses the proxy operation, without an overlapping
+extra span. It starts immediately before the actual handler callback and ends
+after it returns. Its attributes are:
+
+```text
+http.request.method
+http.request.method_original    # only when necessary
+server.address                # backend hostname/IP
+server.port                   # backend port
+url.full                      # complete backend URL
+http.response.status_code     # only when a backend response was received
+network.protocol.version      # outgoing HTTP/1.x request version when observed
+network.peer.address          # actual connected backend IP, when exposed
+network.peer.port             # actual connected port, when exposed
+error.type                    # backend HTTP 4xx/5xx, timeout or proxy_error
+```
+
+The CLIENT span is a child of the SERVER span and supplies the outgoing
+propagation context, so an instrumented backend can become its child. Backend
+status comes from `proxy-status`; Apache-generated failures do not invent a
+backend status. HTTP 1xx/2xx/3xx leave span status unset; SERVER 4xx is unset,
+CLIENT 4xx is error, and 5xx is error. Other instrumented Apache stages are
+INTERNAL spans, with module/stage names and no copied HTTP attributes.
+`ReportAllInstrumentedModules OFF` still records the real proxy CLIENT span.
+No `http.upstream.*` or `http.proxy.*` aliases are emitted.
+
+Port/status attributes are integers. Query strings are not decoded into JSON.
+`url.full` redacts URL credentials. Identifiable `X-Amz-Signature`,
+`X-Amz-Credential`, `X-Amz-Security-Token`, `sig` and `X-Goog-Signature` query
+values are replaced by `REDACTED` in URL attributes; actual traffic is unchanged.
+Custom captured header values retain the requested raw behavior.
+
+For IP proxy targets, a changed `RequestHeader set Host` hostname identifies
+the logical backend in the trace. Explicit Host ports win, otherwise the target
+port is retained. Configured DNS names stay intact; an IP-only configuration
+keeps its IP without guessing via reverse DNS. Connected IP/port are recorded
+separately when Apache exposes them. Paths are not joined or normalized.
 
 When stripping `/api`, match slashes on both sides of your proxy mapping:
 `ProxyPass /api/ https://backend.example/` forwards
