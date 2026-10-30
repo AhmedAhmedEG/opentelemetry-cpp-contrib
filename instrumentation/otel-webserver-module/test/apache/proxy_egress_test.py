@@ -96,13 +96,15 @@ SSLProxyCheckPeerCN off
 """
     results = []
     try:
-        for competing, inject, preserve_host in [(False, True, False), (False, True, True),
-                                                 (True, True, True), (True, False, True)]:
+        for competing, inject, preserve_host, backend_host in [
+                (False, True, False, 'gateway.example'), (False, True, True, 'gateway.example'),
+                (True, True, True, 'gateway.example'), (True, False, True, 'gateway.example'),
+                (False, True, True, 'gateway.example:9443')]:
             extra = '\nApacheModuleTraceRoutes /services\nApacheModuleOtelPropagatorType w3c\n'
             extra += 'ApacheModuleOtelPropagatorExtract OFF\nApacheModuleOtelPropagatorInject ' + ('ON' if inject else 'OFF') + '\n'
             if competing:
                 extra += 'LoadModule late_context_writer_module modules/mod_late_context_writer.so\n'
-            apply(extra + 'ProxyPreserveHost ' + ('ON' if preserve_host else 'OFF') + '\n' + routing)
+            apply(extra + 'ProxyPreserveHost ' + ('ON' if preserve_host else 'OFF') + '\n' + routing.replace('\"gateway.example\"', '\"' + backend_host + '\"'))
             for index in range(5):
                 since = docker('exec', CONTAINER, 'date', '-u', '+%Y-%m-%dT%H:%M:%S.%NZ').strip()
                 marker = uuid.uuid4().hex
@@ -111,14 +113,17 @@ SSLProxyCheckPeerCN off
                                 '-H', 'tracestate: vendor=input', '-H', 'Cookie: fixture=1',
                                 '-H', 'X-dynaTrace-RequestState: fixture', 'http://localhost' + target)
                 pairs = {key.lower(): value for key, value in json.loads(output)}
-                assert 'cookie' not in pairs and pairs['host'] == ('gateway.example' if preserve_host else '127.0.0.1:8765'), pairs
-                assert pairs['x-forwarded-host'] == 'gateway.example', pairs
+                assert 'cookie' not in pairs and pairs['host'] == (backend_host if preserve_host else '127.0.0.1:8765'), pairs
+                assert pairs['x-forwarded-host'] == backend_host, pairs
                 assert pairs['x-echo-path'].startswith('/dxl/poq/stuff?'), pairs
                 for _ in range(50):
                     logs = docker('logs', '--since', since, CONTAINER)
                     if 'url.query: ' + target.split('?', 1)[1] in logs:
                         break
                     time.sleep(0.1)
+                expected_url = 'https://' + (backend_host if ':' in backend_host else backend_host + ':8765') + pairs['x-echo-path']
+                match = re.search(r'(?m)^\s*http\.upstream\.url: (.*)$', logs)
+                assert match and match.group(1) == expected_url, logs
                 spans = span_records(logs)
                 root = next(span for span in spans if span.get('span kind') == 'Server')
                 wire = pairs['traceparent']
@@ -127,7 +132,7 @@ SSLProxyCheckPeerCN off
                              and client['parent_span_id'] == root['span_id'] and 'tracestate' not in pairs)
                 if not inject:
                     valid = wire == INCOMING and pairs.get('tracestate') == 'vendor=restored'
-                result = {'competing_writer': competing, 'inject': inject, 'preserve_host': preserve_host, 'request_index': index,
+                result = {'backend_host': backend_host, 'upstream_url': match.group(1), 'competing_writer': competing, 'inject': inject, 'preserve_host': preserve_host, 'request_index': index,
                           'root': root, 'wire': wire, 'tracestate': pairs.get('tracestate'),
                           'client': client, 'valid': valid}
                 results.append(result)

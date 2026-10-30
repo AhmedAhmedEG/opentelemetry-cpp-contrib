@@ -32,6 +32,8 @@
 #include <apr_strings.h>
 #include <apr_tables.h>
 #include <apr_optional_hooks.h>
+#include <apr_uri.h>
+#include <arpa/inet.h>
 #include <httpd.h>
 #include <http_config.h> // ap_get_module_config and others
 #include <http_core.h>
@@ -66,6 +68,66 @@ using namespace otel::core::sdkwrapper;
 namespace {
 const char* const OTEL_PROPAGATION_KEY = "otel_authoritative_propagation";
 const char* const OTEL_RESPONSE_TRACE_KEY = "otel_response_trace_id";
+const char* const OTEL_INCOMING_HOST_KEY = "otel_incoming_host";
+const char* const OTEL_BACKEND_HOST_KEY = "otel_backend_host";
+const char* const OTEL_UPSTREAM_URL_KEY = "otel_upstream_url";
+
+void* requestPoolValue(request_rec* request, const char* key)
+{
+    void* stored = NULL;
+    for (request_rec* owner = request; owner && !stored; owner = owner->prev)
+        apr_pool_userdata_get(&stored, key, owner->pool);
+    if (!stored && request->main)
+        apr_pool_userdata_get(&stored, key, request->main->pool);
+    return stored;
+}
+
+int captureBackendHost(request_rec* request)
+{
+    // Current mod_proxy versions remove Host from their temporary header table
+    // before proxy fixups. Save it after mod_headers' regular fixups instead.
+    const char* host = apr_table_get(request->headers_in, "Host");
+    if (host && requestPoolValue(request, OTEL_INCOMING_HOST_KEY))
+        apr_pool_userdata_set(apr_pstrdup(request->pool, host), OTEL_BACKEND_HOST_KEY,
+            apr_pool_cleanup_null, request->pool);
+    return DECLINED;
+}
+
+bool isIpAddress(const char* host)
+{
+    unsigned char address[sizeof(struct in6_addr)];
+    return host && (inet_pton(AF_INET, host, address) == 1 ||
+        inet_pton(AF_INET6, host, address) == 1);
+}
+
+std::string upstreamUrl(request_rec* request)
+{
+    if (!request->filename || strncmp(request->filename, "proxy:", 6)) return "";
+    const std::string target(request->filename + 6);
+    apr_uri_t uri;
+    if (apr_uri_parse(request->pool, target.c_str(), &uri) != APR_SUCCESS ||
+        !uri.scheme || !isIpAddress(uri.hostname)) return target;
+
+    // A RequestHeader Host override identifies the logical backend when the
+    // proxy connects to an IP. Do not substitute the caller's original Host,
+    // reverse-resolve an arbitrary IP, or change the actual proxy request.
+    const char* incoming = static_cast<const char*>(requestPoolValue(request, OTEL_INCOMING_HOST_KEY));
+    const char* host = apr_table_get(request->headers_in, "Host");
+    if (!host) host = static_cast<const char*>(requestPoolValue(request, OTEL_BACKEND_HOST_KEY));
+    if (!incoming || !host || !*host || !apr_strnatcasecmp(incoming, host) ||
+        strpbrk(host, "/?#@ \t\r\n")) return target;
+    apr_uri_t logical;
+    const std::string authority = std::string(uri.scheme) + "://" + host + "/";
+    if (apr_uri_parse(request->pool, authority.c_str(), &logical) != APR_SUCCESS ||
+        !logical.hostname || isIpAddress(logical.hostname)) return target;
+    std::string backendAuthority(host);
+    if (!logical.port_str && uri.port_str) backendAuthority += std::string(":") + uri.port_str;
+    const size_t start = target.find("://");
+    if (start == std::string::npos) return target;
+    const size_t end = target.find_first_of("/?#", start + 3);
+    return target.substr(0, start + 3) + backendAuthority +
+        (end == std::string::npos ? "" : target.substr(end));
+}
 
 void setResponseTraceId(request_rec* request)
 {
@@ -94,6 +156,7 @@ void ApacheHooks::registerHooks(apr_pool_t *p)
     // HTTP(S) request headers. No hard dependency on mod_proxy is introduced.
     apr_optional_hook_add("fixups", reinterpret_cast<void (*)(void)>(otel_proxy_fixups),
         NULL, NULL, APR_HOOK_REALLY_LAST + 2);
+    ap_hook_fixups(captureBackendHost, NULL, NULL, APR_HOOK_REALLY_LAST + 2);
     // Place a hook that executes when a child process is spawned
     // (commonly used for initializing modules after the server has forked)
     ap_hook_child_init(otel_child_init, NULL, NULL, APR_HOOK_MIDDLE);
@@ -368,6 +431,23 @@ void ApacheHooks::otel_payload_decorator(request_rec* request, std::unordered_ma
 
 int ApacheHooks::otel_proxy_fixups(request_rec* request)
 {
+    const std::string target = upstreamUrl(request);
+    const char* incomingHost = static_cast<const char*>(requestPoolValue(request, OTEL_INCOMING_HOST_KEY));
+    const char* configuredHost = apr_table_get(request->headers_in, "Host");
+    if (!configuredHost)
+        configuredHost = static_cast<const char*>(requestPoolValue(request, OTEL_BACKEND_HOST_KEY));
+    ApacheTracing::writeTrace(request->server, __func__,
+        "proxy target identity: incoming_host=%s configured_host=%s recorded_url=%s",
+        incomingHost ? incomingHost : "", configuredHost ? configuredHost : "", target.c_str());
+    if (!target.empty())
+    {
+        const char* value = apr_pstrdup(request->pool, target.c_str());
+        apr_pool_userdata_set(value, OTEL_UPSTREAM_URL_KEY, apr_pool_cleanup_null, request->pool);
+        // The root's log hook can run on the original request after a redirect.
+        for (request_rec* owner = request->prev; owner; owner = owner->prev)
+            apr_pool_userdata_set(apr_pstrdup(owner->pool, target.c_str()), OTEL_UPSTREAM_URL_KEY,
+                apr_pool_cleanup_null, owner->pool);
+    }
     otel_cfg* cfg = ApacheConfigHandlers::getConfig(request);
     if (cfg && !cfg->getOtelPropagatorInject()) return DECLINED;
 
@@ -934,6 +1014,10 @@ int ApacheHooks::otel_hook_header_parser_begin(request_rec *r)
     // Store the request data into pool
     if (OTEL_ISSUCCESS(res))
     {
+        const char* incomingHost = apr_table_get(r->headers_in, "Host");
+        if (incomingHost)
+            apr_pool_userdata_set(apr_pstrdup(r->pool, incomingHost), OTEL_INCOMING_HOST_KEY,
+                apr_pool_cleanup_null, r->pool);
         if (!requestPayload->trace_id.empty())
         {
             apr_pool_userdata_set(apr_pstrdup(r->pool, requestPayload->trace_id.c_str()),
@@ -1025,8 +1109,9 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         }
     }
 
-    if (r->filename && !strncmp(r->filename, "proxy:", 6))
-        responsePayload->response_attributes["http.upstream.url"] = r->filename + 6;
+    const char* capturedTarget = static_cast<const char*>(requestPoolValue(r, OTEL_UPSTREAM_URL_KEY));
+    const std::string target = capturedTarget ? capturedTarget : upstreamUrl(r);
+    if (!target.empty()) responsePayload->response_attributes["http.upstream.url"] = target;
     // Record an actual backend response, never substitute Apache's own status.
     const char* upstreamStatus = apr_table_get(r->notes, "proxy-status");
     if (upstreamStatus && *upstreamStatus)

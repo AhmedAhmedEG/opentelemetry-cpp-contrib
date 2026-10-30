@@ -40,9 +40,13 @@ using namespace sdkwrapper;
 constexpr const char* http_request_header = "http.request.header.";
 constexpr const char* http_response_header = "http.response.header.";
 
-static void addHeaderArrays(const std::shared_ptr<IScopedSpan>& span,
+static void addSelectedHeaders(const std::shared_ptr<IScopedSpan>& span,
     const std::unordered_map<std::string, std::vector<std::string>>& attributes) {
     for (const auto& attribute : attributes) {
+        if (attribute.second.size() == 1) {
+            span->AddAttribute(attribute.first, attribute.second.front());
+            continue;
+        }
         std::vector<opentelemetry::nostd::string_view> values;
         for (const auto& value : attribute.second) values.emplace_back(value);
         span->AddAttribute(attribute.first,
@@ -106,7 +110,7 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::startRequest(
     }
 
     auto span = m_sdkWrapper->CreateSpan(spanName, sdkwrapper::SpanKind::SERVER, keyValueMap, payload->get_http_headers());
-    addHeaderArrays(span, payload->header_attributes);
+    addSelectedHeaders(span, payload->header_attributes);
     const auto spanContext = opentelemetry::trace::GetSpan(
         opentelemetry::context::RuntimeContext::GetCurrent())->GetContext();
     if (spanContext.IsValid()) {
@@ -181,7 +185,7 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
         rootSpan->SetStatus(payload && payload->modern_http_attributes ? StatusCode::Unset : StatusCode::Ok);
     }
     if (payload != nullptr) {
-        addHeaderArrays(rootSpan, payload->header_attributes);
+        addSelectedHeaders(rootSpan, payload->header_attributes);
         for (auto itr = payload->response_headers.begin();
             itr != payload->response_headers.end(); itr++) {
             std::string key = std::string(http_response_header) +

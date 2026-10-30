@@ -92,9 +92,9 @@ def check_selected(logs):
     assert response["x-keep-response"] == "keep-response"
     assert attribute(logs, "http.request.header.x-keep-request") is None
     assert attribute(logs, "http.response.header.x-keep-response") is None
-    assert attribute(logs, "http.request.header.authorization") == "[Bearer fixture-token]"
-    assert attribute(logs, "http.request.header.x-request-id") == "[request-id]"
-    assert attribute(logs, "http.response.header.x-response-id") == "[response-id]"
+    assert attribute(logs, "http.request.header.authorization") == "Bearer fixture-token"
+    assert attribute(logs, "http.request.header.x-request-id") == "request-id"
+    assert attribute(logs, "http.response.header.x-response-id") == "response-id"
     assert attribute(logs, "http.response.header.set-cookie") == "[a=1; Expires=Tue, 01 Jan 2030 00:00:00 GMT,b=2]"
     assert attribute(logs, "http.request.header.x-missing") is None
     assert attribute(logs, "http.response.header.x-missing") is None
@@ -121,9 +121,9 @@ ApacheModuleSeparateResponseHeaders X-Response-ID
 """)
         assert combined(logs, "request")["authorization"] == "Bearer fixture-token"
         assert attribute(logs, "http.request.header.authorization") is None
-        assert attribute(logs, "http.request.header.x-request-id") == "[request-id]"
+        assert attribute(logs, "http.request.header.x-request-id") == "request-id"
         assert "set-cookie" in combined(logs, "response")
-        assert attribute(logs, "http.response.header.x-response-id") == "[response-id]"
+        assert attribute(logs, "http.response.header.x-response-id") == "response-id"
         selected = set(re.findall(r"(?m)^\s*(http\.(?:request|response)\.header\.[^:]+):", logs))
         assert selected == {"http.request.header.x-request-id", "http.response.header.x-response-id"}, selected
         print("PASS: explicit lists replace defaults independently")

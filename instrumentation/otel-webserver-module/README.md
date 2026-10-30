@@ -125,8 +125,8 @@ never automatically splits unselected headers into attributes.
 
 Lists are comma-separated, case-insensitive, and ignore surrounding whitespace
 and duplicate names. Quote the argument when it contains spaces. Attribute
-suffixes are lowercase. Values use string arrays, including single values, as required by the HTTP
-semantic conventions. Headers absent
+suffixes are lowercase. A single value is a plain string for direct display in Grafana. Repeated values
+remain string arrays; a comma inside one header value is not split. Headers absent
 from the request or response do not create an attribute.
 
 Both lists default to empty: no headers are separated unless configured.

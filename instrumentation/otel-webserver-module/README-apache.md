@@ -99,7 +99,8 @@ trace ID to return.
 
 Header lists match case-insensitively; quote lists containing spaces. Listed
 headers move out of combined JSON into standard `http.request.header.<lowercase>`
-or `http.response.header.<lowercase>` attributes, always as string arrays.
+or `http.response.header.<lowercase>` attributes: one value is a plain string; repeated values use string arrays. This single-value display intentionally differs from the
+OpenTelemetry header convention, which specifies arrays for all values.
 Missing headers produce no attribute. Lists replace inherited lists; both
 lists default to empty. Only listed headers get separate header attributes.
 Unselected headers remain in custom `http.request.headers` and
@@ -129,11 +130,16 @@ integers. `url.query` is the raw query string, not JSON; capture OFF omits it.
 Combined header values are pretty-printed JSON strings. The combined-header
 and `http.upstream.*` attributes are custom conventions. Selected headers add
 only `http.request.header.<lowercase>` / `http.response.header.<lowercase>`
-string-array attributes. `error.type` is added for HTTP 5xx errors.
+attributes (plain strings for one value; string arrays for repeated values). `error.type` is added for HTTP 5xx errors.
 
 Upstream details stay on the root span: status is the actual backend response
 from mod_proxy_http's `proxy-status` note, and URL is Apache's actual proxy
-URL. Missing values are omitted. Paths are not joined or normalized by the
+URL. If the proxy target is an IP and a `RequestHeader set Host` override
+provides a hostname, that logical hostname is used in the recorded URL. An
+explicit Host port wins; otherwise the target port is retained. DNS target
+names stay intact. With no configured hostname, the target IP is kept: the
+module does not guess a hostname using reverse DNS. This changes telemetry
+only; proxy routing and wire headers are unchanged. Missing values are omitted. Paths are not joined or normalized by the
 module. Client spans retain trace relationships and timing without duplicating
 these attributes. The root does not emit `client.address`, legacy aliases,
 `url.full`, decoded query JSON, or `http.route` without a known route template.

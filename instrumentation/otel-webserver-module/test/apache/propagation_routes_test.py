@@ -55,6 +55,7 @@ base = "\n".join(line for line in original.splitlines() if not line.lower().star
 base += "\nApacheModuleReportAllInstrumentedModules ON\n"
 base += "ProxyPass /services/unavailable/ http://127.0.0.1:8766/\n"
 base += "ProxyPass /services/ http://127.0.0.1:8765/\n"
+base += "ProxyPass /named/ http://localhost:8765/\n"
 base += "ProxyPass /badjoin http://127.0.0.1:8765/\n"
 
 with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
@@ -243,6 +244,11 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
             match = re.search(r"(?m)^\s*" + re.escape(key) + r": (.*)$", logs)
             assert match and match.group(1) == "http://127.0.0.1:8765" + received_path, logs
         print("PASS: stripped /services prefix preserves the exact nested backend URL without adding slashes")
+
+        response, _, logs = request("/named/dxl/poq/stuff")
+        received_path = dict(json.loads(response))["X-Echo-Path"]
+        assert "http.upstream.url: http://localhost:8765" + received_path in logs, logs
+        print("PASS: configured backend DNS hostname is retained without reverse DNS")
 
         _, _, logs = request("/services/status/503")
         root_block = next(block for block in logs.split("{\n  name")[1:]
