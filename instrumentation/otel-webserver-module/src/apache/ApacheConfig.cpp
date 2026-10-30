@@ -18,6 +18,7 @@
 #include "ApacheConfig.h"
 // apache headers
 #include <apr_strings.h> // apr_pstrcat
+#include <util_cfgtree.h>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -28,6 +29,62 @@
 #include "ApacheTracing.h"
 
 std::unordered_map<std::string, std::shared_ptr<WebserverContext> > ApacheConfigHandlers::m_webServerContexts;
+
+const char* ApacheConfigHandlers::otel_observe_proxyPass(cmd_parms* cmd, void* conf, const char* args)
+{
+    // Apache invokes every handler registered for a directive. Observe only;
+    // mod_proxy continues to parse and execute its original command normally.
+    if (!ap_find_linked_module("mod_proxy.c")) return "ProxyPass requires mod_proxy";
+    auto cfg = static_cast<otel_cfg*>(conf);
+    bool regex = !strcasecmp(cmd->cmd->name, "ProxyPassMatch");
+    const char* prefix = cmd->path;
+    if (!prefix)
+    {
+        prefix = ap_getword_conf(cmd->pool, &args);
+        if (!strcmp(prefix, "~")) { regex = true; prefix = ap_getword_conf(cmd->pool, &args); }
+    }
+    const char* target = ap_getword_conf(cmd->pool, &args);
+    bool location = cmd->path != NULL;
+    for (auto node = cmd->directive->parent; node; node = node->parent)
+        if (!strcasecmp(node->directive, "<LocationMatch")) { regex = true; break; }
+    if (!cfg->proxyNameRules)
+        cfg->proxyNameRules = apr_array_make(cmd->pool, 4, sizeof(OtelProxyNameRule));
+    auto rule = static_cast<OtelProxyNameRule*>(apr_array_push(cfg->proxyNameRules));
+    rule->prefix = prefix;
+    rule->target = target;
+    rule->regex = regex;
+    rule->location = location;
+    rule->supported = prefix && *prefix && target && *target &&
+        !strstr(target, "${") && (regex || !strchr(target, '$'));
+    rule->compiled = regex ? ap_pregcomp(cmd->pool, prefix, AP_REG_EXTENDED) : NULL;
+    if (regex && !rule->compiled) rule->supported = false;
+    while (*args)
+        if (!strcasecmp(ap_getword_conf(cmd->pool, &args), "interpolate")) rule->supported = false;
+    return DECLINE_CMD;
+}
+
+const char* ApacheConfigHandlers::otel_observe_proxyInherit(cmd_parms* cmd, void* conf, int flag)
+{
+    if (!ap_find_linked_module("mod_proxy.c")) return "ProxyPassInherit requires mod_proxy";
+    static_cast<otel_cfg*>(conf)->proxyNameInherit = flag;
+    return DECLINE_CMD;
+}
+
+const char* ApacheConfigHandlers::otel_set_serverSpanTarget(cmd_parms* cmd, void* conf, const char* arg)
+{
+    const char* label = ap_getword_conf(cmd->pool, &arg);
+    if (*arg) return "ApacheModuleServerSpanTarget takes one label; quote labels containing spaces";
+    static_cast<otel_cfg*>(conf)->serverSpanTarget = label;
+    return NULL;
+}
+
+const char* ApacheConfigHandlers::otel_set_clientSpanTarget(cmd_parms* cmd, void* conf, const char* arg)
+{
+    const char* label = ap_getword_conf(cmd->pool, &arg);
+    if (*arg) return "ApacheModuleClientSpanTarget takes one label; quote labels containing spaces";
+    static_cast<otel_cfg*>(conf)->clientSpanTarget = label;
+    return NULL;
+}
 
 //--------------------------------------------------------------------------
 // COMMAND (CONFIGURATION DIRECTIVE) HANDLERS
@@ -510,6 +567,10 @@ const char* ApacheConfigHandlers::otel_add_webserver_context(
 
 void otel_cfg::init()
 {
+    proxyNameRules = NULL;
+    proxyNameInherit = -1;
+    serverSpanTarget = NULL;
+    clientSpanTarget = NULL;
     // Agent to Controller Connection Configuration
     // otelEnabled                 OPTIONAL: 0 for false, 1 for true (defaults to true)
     otelEnabled = 1;
@@ -750,145 +811,170 @@ void* ApacheConfigHandlers::otel_merge_dir_config(apr_pool_t* p, void* parent_co
     otel_cfg* merged_config = (otel_cfg*) otel_create_dir_config(p, (char*)"Merged Directory Configuration");
     otel_cfg* pconf = (otel_cfg*) parent_conf;
     otel_cfg* nconf = (otel_cfg*) newloc_conf;
+    merged_config->proxyNameInherit = nconf->proxyNameInherit >= 0 ? nconf->proxyNameInherit : pconf->proxyNameInherit;
+    merged_config->serverSpanTarget = nconf->serverSpanTarget ? nconf->serverSpanTarget : pconf->serverSpanTarget;
+    merged_config->clientSpanTarget = nconf->clientSpanTarget ? nconf->clientSpanTarget : pconf->clientSpanTarget;
+    if (nconf->proxyNameRules && pconf->proxyNameRules && nconf->proxyNameInherit != 0)
+    {
+        const auto child = reinterpret_cast<const OtelProxyNameRule*>(nconf->proxyNameRules->elts);
+        bool locationOverride = false;
+        for (int i = 0; i < nconf->proxyNameRules->nelts; ++i) locationOverride |= child[i].location;
+        if (!locationOverride)
+            merged_config->proxyNameRules = apr_array_append(p, nconf->proxyNameRules, pconf->proxyNameRules);
+        else
+        {
+            merged_config->proxyNameRules = apr_array_copy(p, nconf->proxyNameRules);
+            const auto parent = reinterpret_cast<const OtelProxyNameRule*>(pconf->proxyNameRules->elts);
+            for (int i = 0; i < pconf->proxyNameRules->nelts; ++i)
+                if (!parent[i].location)
+                    *static_cast<OtelProxyNameRule*>(apr_array_push(merged_config->proxyNameRules)) = parent[i];
+        }
+    }
+    else
+        merged_config->proxyNameRules = nconf->proxyNameRules ? nconf->proxyNameRules :
+            (nconf->proxyNameInherit == 0 ? NULL : pconf->proxyNameRules);
 
+    // Preserve whether an option was explicitly set. Apache may merge sparse
+    // Location configs before merging the server defaults; marking absent
+    // options as initialized would otherwise erase the server identity.
     // Agent to Controller Connection Configuration
     // otelEnabled             OPTIONAL: 0 for false, 1 for true (defaults to false)
     merged_config->otelEnabled = nconf->otelEnabled_initialized ? nconf->otelEnabled : pconf->otelEnabled;
-    merged_config->otelEnabled_initialized = 1;
+    merged_config->otelEnabled_initialized = nconf->otelEnabled_initialized || pconf->otelEnabled_initialized;
 
     // otelExporterEndpoint          REQUIRED: Collector endpoint where the OpenTelemetry Exporter inside OTel SDK sends traces
     merged_config->otelExporterEndpoint = nconf->otelExporterEndpoint_initialized ?
             apr_pstrdup(p, nconf->otelExporterEndpoint) : apr_pstrdup(p, pconf->otelExporterEndpoint);
-    merged_config->otelExporterEndpoint_initialized = 1;
+    merged_config->otelExporterEndpoint_initialized = nconf->otelExporterEndpoint_initialized || pconf->otelExporterEndpoint_initialized;
 
     // otelSslEnabled
     merged_config->otelSslEnabled = nconf->otelSslEnabled_initialized ?
             nconf->otelSslEnabled : pconf->otelSslEnabled;
-    merged_config->otelSslEnabled_initialized = 1;
+    merged_config->otelSslEnabled_initialized = nconf->otelSslEnabled_initialized || pconf->otelSslEnabled_initialized;
 
     // otelSslEnabled
     merged_config->otelSslCertificatePath = nconf->otelSslCertificatePath_initialized ?
             apr_pstrdup(p, nconf->otelSslCertificatePath) : apr_pstrdup(p, pconf->otelSslCertificatePath);
-    merged_config->otelSslCertificatePath_initialized = 1;
+    merged_config->otelSslCertificatePath_initialized = nconf->otelSslCertificatePath_initialized || pconf->otelSslCertificatePath_initialized;
 
     // otelExporterType          OPTIONAL: Type of exporter to be configured in TracerProvider of OTel SDK embedded into Agent
     merged_config->otelExporterType = nconf->otelExporterType_initialized ?
             apr_pstrdup(p, nconf->otelExporterType) : apr_pstrdup(p, pconf->otelExporterType);
-    merged_config->otelExporterType_initialized = 1;
+    merged_config->otelExporterType_initialized = nconf->otelExporterType_initialized || pconf->otelExporterType_initialized;
 
     // otelProcessorType           OPTIONAL: Decision on how to pass finished and export-friendly span data representation to configured span exporter
     merged_config->otelProcessorType = nconf->otelProcessorType_initialized ?
             apr_pstrdup(p, nconf->otelProcessorType) : apr_pstrdup(p, pconf->otelProcessorType);
-    merged_config->otelProcessorType_initialized = 1;
+    merged_config->otelProcessorType_initialized = nconf->otelProcessorType_initialized || pconf->otelProcessorType_initialized;
 
     // otelSamplerType             OPTIONAL: Type of Otel Sampler
     merged_config->otelSamplerType = nconf->otelSamplerType_initialized ?
             apr_pstrdup(p, nconf->otelSamplerType) : apr_pstrdup(p, pconf->otelSamplerType);
-    merged_config->otelSamplerType_initialized = 1;
+    merged_config->otelSamplerType_initialized = nconf->otelSamplerType_initialized || pconf->otelSamplerType_initialized;
 
     merged_config->otelPropagatorType = nconf->otelPropagatorType_initialized ?
         apr_pstrdup(p, nconf->otelPropagatorType) : apr_pstrdup(p, pconf->otelPropagatorType);
-    merged_config->otelPropagatorType_initialized = 1;
+    merged_config->otelPropagatorType_initialized = nconf->otelPropagatorType_initialized || pconf->otelPropagatorType_initialized;
 
     merged_config->otelPropagatorExtract = nconf->otelPropagatorExtract_initialized ?
         nconf->otelPropagatorExtract : pconf->otelPropagatorExtract;
-    merged_config->otelPropagatorExtract_initialized = 1;
+    merged_config->otelPropagatorExtract_initialized = nconf->otelPropagatorExtract_initialized || pconf->otelPropagatorExtract_initialized;
 
     merged_config->otelPropagatorInject = nconf->otelPropagatorInject_initialized ?
         nconf->otelPropagatorInject : pconf->otelPropagatorInject;
-    merged_config->otelPropagatorInject_initialized = 1;
+    merged_config->otelPropagatorInject_initialized = nconf->otelPropagatorInject_initialized || pconf->otelPropagatorInject_initialized;
 
     // serviceNamespace          REQUIRED: A namespace for the ServiceName;
     merged_config->serviceNamespace = nconf->serviceNamespace_initialized ?
             apr_pstrdup(p, nconf->serviceNamespace) : apr_pstrdup(p, pconf->serviceNamespace);
-    merged_config->serviceNamespace_initialized = 1;
+    merged_config->serviceNamespace_initialized = nconf->serviceNamespace_initialized || pconf->serviceNamespace_initialized;
 
     // serviceName               REQUIRED: Logical name of the service;
     merged_config->serviceName = nconf->serviceName_initialized ?
             apr_pstrdup(p, nconf->serviceName) : apr_pstrdup(p, pconf->serviceName);
-    merged_config->serviceName_initialized = 1;
+    merged_config->serviceName_initialized = nconf->serviceName_initialized || pconf->serviceName_initialized;
 
     // serviceInstanceId         REQUIRED: The string ID of the service instance. Distinguish between instances of a service
     merged_config->serviceInstanceId = nconf->serviceInstanceId_initialized ?
             apr_pstrdup(p, nconf->serviceInstanceId) : apr_pstrdup(p, pconf->serviceInstanceId);
-    merged_config->serviceInstanceId_initialized = 1;
+    merged_config->serviceInstanceId_initialized = nconf->serviceInstanceId_initialized || pconf->serviceInstanceId_initialized;
 
     // otelMaxQueueSize              OPTIONAL: The maximum queue size. After the size is reached spans are dropped
     merged_config->otelMaxQueueSize = nconf->otelMaxQueueSize_initialized ?
             apr_pstrdup(p, nconf->otelMaxQueueSize) : apr_pstrdup(p, pconf->otelMaxQueueSize);
-    merged_config->otelMaxQueueSize_initialized = 1;
+    merged_config->otelMaxQueueSize_initialized = nconf->otelMaxQueueSize_initialized || pconf->otelMaxQueueSize_initialized;
 
     // otelScheduledDelay         OPTIONAL: The delay interval in milliseconds between two consecutive exports
     merged_config->otelScheduledDelay = nconf->otelScheduledDelay_initialized ?
             apr_pstrdup(p, nconf->otelScheduledDelay) : apr_pstrdup(p, pconf->otelScheduledDelay);
-    merged_config->otelScheduledDelay_initialized = 1;
+    merged_config->otelScheduledDelay_initialized = nconf->otelScheduledDelay_initialized || pconf->otelScheduledDelay_initialized;
 
     // otelExportTimeout                OPTIONAL: How long the export can run in milliseconds before it is cancelled
     merged_config->otelExportTimeout = nconf->otelExportTimeout_initialized ?
             apr_pstrdup(p, nconf->otelExportTimeout) : apr_pstrdup(p, pconf->otelExportTimeout);
-    merged_config->otelExportTimeout_initialized = 1;
+    merged_config->otelExportTimeout_initialized = nconf->otelExportTimeout_initialized || pconf->otelExportTimeout_initialized;
 
     // otelMaxExportBatchSize                OPTIONAL: The maximum batch size of every export. It must be smaller or equal to maxQueueSize
     merged_config->otelMaxExportBatchSize = nconf->otelMaxExportBatchSize_initialized ?
             apr_pstrdup(p, nconf->otelMaxExportBatchSize) : apr_pstrdup(p, pconf->otelMaxExportBatchSize);
-    merged_config->otelMaxExportBatchSize_initialized = 1;
+    merged_config->otelMaxExportBatchSize_initialized = nconf->otelMaxExportBatchSize_initialized || pconf->otelMaxExportBatchSize_initialized;
 
     merged_config->resolveBackends = nconf->resolveBackends_initialized ?
             nconf->resolveBackends : pconf->resolveBackends;
-    merged_config->resolveBackends_initialized = 1;
+    merged_config->resolveBackends_initialized = nconf->resolveBackends_initialized || pconf->resolveBackends_initialized;
     merged_config->traceAsError = nconf->traceAsError_initialized ? nconf->traceAsError : pconf->traceAsError;
-    merged_config->traceAsError_initialized = 1;
+    merged_config->traceAsError_initialized = nconf->traceAsError_initialized || pconf->traceAsError_initialized;
     merged_config->reportAllInstrumentedModules = nconf->reportAllInstrumentedModules_initialized ?
             nconf->reportAllInstrumentedModules : pconf->reportAllInstrumentedModules;
-    merged_config->reportAllInstrumentedModules_initialized = 1;
+    merged_config->reportAllInstrumentedModules_initialized = nconf->reportAllInstrumentedModules_initialized || pconf->reportAllInstrumentedModules_initialized;
 
     // for masking cookies
     merged_config->maskCookie = nconf->maskCookie_initialized ? nconf->maskCookie : pconf->maskCookie;
-    merged_config->maskCookie_initialized = 1;
+    merged_config->maskCookie_initialized = nconf->maskCookie_initialized || pconf->maskCookie_initialized;
     merged_config->cookiePattern = nconf->cookiePattern_initialized ? nconf->cookiePattern : pconf->cookiePattern;
-    merged_config->cookiePattern_initialized = 1;
+    merged_config->cookiePattern_initialized = nconf->cookiePattern_initialized || pconf->cookiePattern_initialized;
 
     // for masking SM_USER
     merged_config->maskSmUser = nconf->maskSmUser_initialized ? nconf->maskSmUser : pconf->maskSmUser;
-    merged_config->maskSmUser_initialized = 1;
+    merged_config->maskSmUser_initialized = nconf->maskSmUser_initialized || pconf->maskSmUser_initialized;
 
     // for redacting URL segments
     merged_config->delimiter = nconf->delimiter_initialized ? nconf->delimiter : pconf->delimiter;
-    merged_config->delimiter_initialized = 1;
+    merged_config->delimiter_initialized = nconf->delimiter_initialized || pconf->delimiter_initialized;
 
     merged_config->segment = nconf->segment_initialized ? nconf->segment : pconf->segment;
-    merged_config->segment_initialized = 1;
+    merged_config->segment_initialized = nconf->segment_initialized || pconf->segment_initialized;
 
     merged_config->matchFilter  = nconf->matchFilter_initialized ? nconf->matchFilter  : pconf->matchFilter ;
-    merged_config->matchFilter_initialized = 1;
+    merged_config->matchFilter_initialized = nconf->matchFilter_initialized || pconf->matchFilter_initialized;
 
     merged_config->matchPattern = nconf->matchPattern_initialized ? nconf->matchPattern : pconf->matchPattern;
-    merged_config->matchPattern_initialized = 1;
+    merged_config->matchPattern_initialized = nconf->matchPattern_initialized || pconf->matchPattern_initialized;
 
     merged_config->segmentType = nconf->segmentType_initialized ? nconf->segmentType : pconf->segmentType;
-    merged_config->segmentType_initialized = 1;
+    merged_config->segmentType_initialized = nconf->segmentType_initialized || pconf->segmentType_initialized;
 
     merged_config->segmentParameter = nconf->segmentParameter_initialized ? nconf->segmentParameter : pconf->segmentParameter;
-    merged_config->segmentParameter_initialized = 1;
+    merged_config->segmentParameter_initialized = nconf->segmentParameter_initialized || pconf->segmentParameter_initialized;
 
     merged_config->captureRequestHeaders = nconf->captureRequestHeaders_initialized ?
         nconf->captureRequestHeaders : pconf->captureRequestHeaders;
-    merged_config->captureRequestHeaders_initialized = 1;
+    merged_config->captureRequestHeaders_initialized = nconf->captureRequestHeaders_initialized || pconf->captureRequestHeaders_initialized;
     merged_config->captureResponseHeaders = nconf->captureResponseHeaders_initialized ?
         nconf->captureResponseHeaders : pconf->captureResponseHeaders;
-    merged_config->captureResponseHeaders_initialized = 1;
+    merged_config->captureResponseHeaders_initialized = nconf->captureResponseHeaders_initialized || pconf->captureResponseHeaders_initialized;
     merged_config->captureQueryParameters = nconf->captureQueryParameters_initialized ?
         nconf->captureQueryParameters : pconf->captureQueryParameters;
-    merged_config->captureQueryParameters_initialized = 1;
+    merged_config->captureQueryParameters_initialized = nconf->captureQueryParameters_initialized || pconf->captureQueryParameters_initialized;
     merged_config->traceRoutes = nconf->traceRoutes_initialized ?
         apr_pstrdup(p, nconf->traceRoutes) : apr_pstrdup(p, pconf->traceRoutes);
-    merged_config->traceRoutes_initialized = 1;
+    merged_config->traceRoutes_initialized = nconf->traceRoutes_initialized || pconf->traceRoutes_initialized;
     merged_config->separateRequestHeaders = nconf->separateRequestHeaders_initialized ?
         apr_pstrdup(p, nconf->separateRequestHeaders) : apr_pstrdup(p, pconf->separateRequestHeaders);
-    merged_config->separateRequestHeaders_initialized = 1;
+    merged_config->separateRequestHeaders_initialized = nconf->separateRequestHeaders_initialized || pconf->separateRequestHeaders_initialized;
     merged_config->separateResponseHeaders = nconf->separateResponseHeaders_initialized ?
         apr_pstrdup(p, nconf->separateResponseHeaders) : apr_pstrdup(p, pconf->separateResponseHeaders);
-    merged_config->separateResponseHeaders_initialized = 1;
+    merged_config->separateResponseHeaders_initialized = nconf->separateResponseHeaders_initialized || pconf->separateResponseHeaders_initialized;
 
 
     ApacheTracing::writeTrace(NULL, __func__,

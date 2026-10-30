@@ -46,6 +46,16 @@
 typedef const char *(*CMD_HAND_TYPE) ();
 static const command_rec otel_cmds[] =
 {
+    AP_INIT_RAW_ARGS("ProxyPass", (CMD_HAND_TYPE)ApacheConfigHandlers::otel_observe_proxyPass,
+            NULL, RSRC_CONF|ACCESS_CONF, "Observe proxy routing for span names"),
+    AP_INIT_RAW_ARGS("ProxyPassMatch", (CMD_HAND_TYPE)ApacheConfigHandlers::otel_observe_proxyPass,
+            NULL, RSRC_CONF|ACCESS_CONF, "Observe proxy routing for span names"),
+    AP_INIT_FLAG("ProxyPassInherit", (CMD_HAND_TYPE)ApacheConfigHandlers::otel_observe_proxyInherit,
+            NULL, RSRC_CONF, "Observe proxy inheritance for span names"),
+    AP_INIT_RAW_ARGS("ApacheModuleServerSpanTarget", (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_serverSpanTarget,
+            NULL, OR_ALL, "Explicit bounded SERVER span target label; empty uses method only"),
+    AP_INIT_RAW_ARGS("ApacheModuleClientSpanTarget", (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_clientSpanTarget,
+            NULL, OR_ALL, "Explicit bounded CLIENT span target label; empty uses method only"),
     AP_INIT_TAKE1(
             "apacheModuleEnabled",
             (CMD_HAND_TYPE)ApacheConfigHandlers::otel_set_enabled,

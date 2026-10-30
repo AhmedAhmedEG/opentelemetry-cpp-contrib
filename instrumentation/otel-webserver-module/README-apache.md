@@ -47,8 +47,10 @@ Every directive below has the prefix **`ApacheModule`**. Example:
 | `CaptureQueryParameters` | `ON` / `OFF`: `url.query` (omitted when OFF). |
 | `SeparateRequestHeaders` | Comma-separated names; default empty; `""` clears. |
 | `SeparateResponseHeaders` | Comma-separated names; default empty; `""` clears. |
+| `ServerSpanTarget` | Static SERVER name target; default automatic routing rule; `""` forces method-only. |
+| `ClientSpanTarget` | Static CLIENT name target; default automatic proxy rule; `""` forces method-only. |
 | `TraceRoutes` | Comma-separated paths and all descendants; trailing slashes allowed. Omit or use `/` for all routes. |
-| `SegmentType` | `FIRST`, `LAST`, `CUSTOM`; bypassed by Apache's method-only HTTP name. |
+| `SegmentType` | `FIRST`, `LAST`, `CUSTOM`; bypassed by Apache's configured HTTP name. |
 | `SegmentParameter` | Segment count or indexes; also bypassed for Apache root names. |
 | `MaskCookie` | `ON` / `OFF`; legacy setting, currently unused. |
 | `CookieMatchPattern` | Cookie pattern; currently unused. |
@@ -108,9 +110,32 @@ Unselected headers remain in custom `http.request.headers` and
 without disabling propagation or `x-trace-id`.
 
 HTTP span semantics follow the [OpenTelemetry HTTP conventions](https://opentelemetry.io/docs/specs/semconv/http/http-spans/).
-Apache's incoming span is SERVER. Its name is the known HTTP method (for
-example `GET`), or `HTTP` for an unknown method. Raw paths are attributes,
-not span names or invented route templates. `OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS`
+Apache's incoming span is SERVER. HTTP names are `METHOD configured-target`.
+Static `ProxyPass` prefixes and `<Location>` mappings produce names such as
+`GET /api/{path}` (SERVER) and `GET backend.example/v1/{path}` (CLIENT).
+`ProxyPassMatch` simple captures become `{param1}` or `{path}`; more complex
+patterns retain the bounded configured pattern. Apache's winning mapping is
+verified against its resolved proxy destination; request IDs and query values
+never become name targets. Native mapping order and Location overrides apply.
+
+For complex rewrites or application-specific templates, set static labels in
+server, VirtualHost or Location configuration (prefix each directive below
+with `ApacheModule`):
+
+```apache
+<Location /api/>
+    ApacheModuleServerSpanTarget /api/{path}
+    ApacheModuleClientSpanTarget backend.example/v1/{path}
+</Location>
+```
+
+These labels are literal; no request-variable interpolation occurs. Omitted
+labels use automatic proxy matching; `""` explicitly restores method-only names
+and overrides inherited labels. Unmatched, unsupported dynamic mappings and
+non-proxy requests use the method alone unless a label is configured. Unknown
+methods use `HTTP`. Existing attributes remain unchanged; these naming controls
+add no `http.route` or `url.template` attributes.
+ `OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS`
 can override the known-method list using comma-separated, case-sensitive names.
 
 The SERVER span records these standard fields when available:
@@ -138,7 +163,7 @@ stay on the SERVER span. Capture controls affect these custom/selected fields;
 standard User-Agent and network attributes remain independent.
 
 The actual `mod_proxy` HTTP(S) handler is wrapped once as a CLIENT span named
-with the HTTP method. This reuses the proxy operation, without an overlapping
+with the method and configured proxy target when available. This reuses the proxy operation, without an overlapping
 extra span. It starts immediately before the actual handler callback and ends
 after it returns. Its attributes are:
 

@@ -23,6 +23,17 @@
 #include <unordered_map>
 #include "httpd.h" // request_rec
 #include "http_config.h" // cmd_parms
+#include <apr_tables.h>
+#include <ap_regex.h>
+
+struct OtelProxyNameRule {
+    const char* prefix;
+    const char* target;
+    bool regex;
+    bool location;
+    bool supported;
+    ap_regex_t* compiled;
+};
 
 class otel_cfg
 {
@@ -125,10 +136,17 @@ public:
     const char* getTraceRoutes() { return traceRoutes; }
     const char* getSeparateRequestHeaders() { return separateRequestHeaders; }
     const char* getSeparateResponseHeaders() { return separateResponseHeaders; }
+    apr_array_header_t* getProxyNameRules() { return proxyNameRules; }
+    const char* getServerSpanTarget() { return serverSpanTarget; }
+    const char* getClientSpanTarget() { return clientSpanTarget; }
 
     friend class ApacheConfigHandlers;
 
 private:
+    apr_array_header_t* proxyNameRules;
+    int proxyNameInherit;
+    const char* serverSpanTarget;
+    const char* clientSpanTarget;
     // Agent to Controller Connection Configuration
     int otelEnabled;                    // OPTIONAL: 0 for false, 1 for true (defaults to true)
     int otelEnabled_initialized;
@@ -260,6 +278,10 @@ private:
 class ApacheConfigHandlers
 {
 public:
+    static const char* otel_observe_proxyPass(cmd_parms*, void*, const char*);
+    static const char* otel_observe_proxyInherit(cmd_parms*, void*, int);
+    static const char* otel_set_serverSpanTarget(cmd_parms*, void*, const char*);
+    static const char* otel_set_clientSpanTarget(cmd_parms*, void*, const char*);
     static std::unordered_map<std::string, std::shared_ptr<WebserverContext> > m_webServerContexts;
 
     static const char* otel_set_enabled(cmd_parms *cmd, void *conf, const char *arg);

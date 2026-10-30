@@ -38,6 +38,7 @@ public:
         const AgentLogger& logger);
 
 	void End() override;
+    void UpdateName(const std::string& name) override;
 
 	void AddEvent(const std::string& name,
         const std::chrono::system_clock::time_point &time_point,

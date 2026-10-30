@@ -120,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                 required = allowed - {"error.type", "http.request.method_original"}
                 assert required <= names, (required - names, root_block)
                 assert "url.query: propagation-test=" + marker in attributes
-                assert root_block.lstrip().startswith(": GET\n"), root_block
+                assert re.match(r": GET(?: [^\n]+)?\n", root_block.lstrip()), root_block
                 assert "url.full:" not in attributes and "http.upstream." not in logs
                 client_allowed = {"server.address", "server.port", "url.full", "http.request.method",
                                   "http.request.method_original", "http.response.status_code", "error.type",
@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="otel-propagation-test-") as directory:
                         clients.append(block)
                         assert fields <= client_allowed, (fields - client_allowed, block)
                         assert {"server.address", "server.port", "url.full", "http.request.method"} <= fields, block
-                        assert block.lstrip().startswith(": GET\n"), block
+                        assert re.match(r": GET(?: [^\n]+)?\n", block.lstrip()), block
                         assert "parent_span_id: " + root["span_id"] in block, block
                     elif "span kind     : Internal" in block:
                         assert not fields and "status        : Unset" in block, block

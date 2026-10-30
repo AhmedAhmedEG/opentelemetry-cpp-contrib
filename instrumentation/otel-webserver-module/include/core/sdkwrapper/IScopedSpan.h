@@ -36,6 +36,7 @@ public:
 	virtual ~IScopedSpan() = default;
 
 	virtual void End() = 0;
+    virtual void UpdateName(const std::string& name) {}
 
 	virtual void AddEvent(const std::string& name,
     	const std::chrono::system_clock::time_point &timePoint,

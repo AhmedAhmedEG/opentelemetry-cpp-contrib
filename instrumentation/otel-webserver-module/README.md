@@ -65,7 +65,7 @@ Monitoring individual modules is crucial to the instrumentation of Apache web se
 |*ApacheModuleOtelExporterHeaders*               |                 | OPTIONAL: OTEL Exporter header info or Metadata like API key for OTLP endpoint. a list of key value pairs, and these are expected to be represented in a format matching to the W3C Correlation-Context, except that additional semi-colon delimited metadata is not supported, i.e.: key1=value1,key2=value2. |
 
 See [opentelemetry_module.conf](opentelemetry_module.conf) for the complete example
-and [README-apache.md](README-apache.md) for all 37 Apache directives. The archive
+and [README-apache.md](README-apache.md) for all 39 Apache directives. The archive
 ships the quick reference as `README.md` and the example under `conf/`.
 
 The generic example traces all routes. To restrict it, set
@@ -93,8 +93,13 @@ The actual HTTP(S) mod_proxy handler is one CLIENT span, directly parented to
 the SERVER span. Backend information uses standard `server.address`,
 `server.port`, `url.full`, `http.response.status_code` and available connection
 attributes on that CLIENT span. Its active context is propagated downstream.
-HTTP span names use the method, not a raw path; SERVER request paths remain in
-`url.path`. No custom upstream aliases are emitted. See the quick reference
+HTTP names combine the method with a bounded configured routing target, e.g.
+`GET /api/{path}` and `GET backend.example/v1/{path}`. Static ProxyPass,
+Location and ProxyPassMatch mappings are recognized automatically.
+`ApacheModuleServerSpanTarget` / `ApacheModuleClientSpanTarget` supply literal
+labels for complex rewrites; `""` forces method-only names. Unmatched routes
+fall back to the method. Attributes remain unchanged; raw paths stay in
+`url.path` / `url.full`. No custom upstream aliases are emitted. See the quick reference
 for status rules, URL sanitization, attributes and the retained custom headers.
 
 With extraction OFF, Apache reuses the valid incoming trace ID but creates a

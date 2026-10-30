@@ -73,6 +73,7 @@ const char* const OTEL_INCOMING_HOST_KEY = "otel_incoming_host";
 const char* const OTEL_BACKEND_HOST_KEY = "otel_backend_host";
 const char* const OTEL_UPSTREAM_URL_KEY = "otel_upstream_url";
 const char* const OTEL_HTTP_CLIENT_KEY = "otel_http_client";
+const char* const OTEL_SERVER_NAME_KEY = "otel_server_span_name";
 int (*originalProxyHandler)(request_rec*) = NULL;
 
 std::string httpMethod(const char* method)
@@ -96,6 +97,131 @@ std::string httpSpanName(const char* method)
 {
     const std::string normalized = httpMethod(method);
     return normalized == "_OTHER" ? "HTTP" : normalized;
+}
+
+std::string pathTarget(std::string prefix)
+{
+    if (prefix.empty()) prefix = "/";
+    if (prefix.back() != '/') prefix += '/';
+    return prefix + "{path}";
+}
+
+std::string regexTarget(const std::string& pattern, std::vector<std::string>& groups)
+{
+    std::string text = pattern;
+    if (!text.empty() && text.front() == '^') text.erase(0, 1);
+    if (!text.empty() && text.back() == '$') text.pop_back();
+    std::string result;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] == '(')
+        {
+            const size_t end = text.find(')', i + 1);
+            if (end == std::string::npos) return "match:" + pattern;
+            const std::string group = text.substr(i + 1, end - i - 1);
+            if (group != ".*" && group != ".+" && group != "[^/]+" &&
+                group != "[0-9]+" && group != "\\d+") return "match:" + pattern;
+            const std::string label = group == ".*" || group == ".+" ? "{path}" :
+                "{param" + std::to_string(groups.size() + 1) + "}";
+            groups.push_back(label);
+            result += label;
+            i = end;
+        }
+        else if (text[i] == '\\' && i + 1 < text.size() &&
+            (text[i + 1] == '.' || text[i + 1] == '/' || text[i + 1] == '-')) result += text[++i];
+        else if (strchr("[]?+*|{}^$\\", text[i])) return "match:" + pattern;
+        else result += text[i];
+    }
+    return result;
+}
+
+bool sameProxyTarget(request_rec* request, const std::string& expected, const std::string& actual)
+{
+    apr_uri_t a, b;
+    if (apr_uri_parse(request->pool, expected.c_str(), &a) != APR_SUCCESS ||
+        apr_uri_parse(request->pool, actual.c_str(), &b) != APR_SUCCESS ||
+        !a.scheme || !b.scheme || !a.hostname || !b.hostname) return false;
+    const apr_port_t ap = a.port ? a.port : apr_uri_port_of_scheme(a.scheme);
+    const apr_port_t bp = b.port ? b.port : apr_uri_port_of_scheme(b.scheme);
+    return !apr_strnatcasecmp(a.scheme, b.scheme) && !apr_strnatcasecmp(a.hostname, b.hostname) &&
+        ap == bp && !strcmp(a.path ? a.path : "/", b.path ? b.path : "/");
+}
+
+const OtelProxyNameRule* namingRule(request_rec* request, bool requireResolvedTarget)
+{
+    auto cfg = ApacheConfigHandlers::getConfig(request);
+    const auto rules = cfg ? cfg->getProxyNameRules() : NULL;
+    if (!rules) return NULL;
+    const auto entries = reinterpret_cast<const OtelProxyNameRule*>(rules->elts);
+    const std::string path = request->uri ? request->uri : "";
+    const std::string actual = request->filename && !strncmp(request->filename, "proxy:", 6)
+        ? request->filename + 6 : "";
+    for (int i = 0; i < rules->nelts; ++i)
+    {
+        const auto& rule = entries[i];
+        if (!rule.supported) continue;
+        std::string expected;
+        if (rule.regex)
+        {
+            ap_regmatch_t matches[AP_MAX_REG_MATCH];
+            if (!rule.compiled || ap_regexec(rule.compiled, path.c_str(), AP_MAX_REG_MATCH, matches, 0)) continue;
+            const char* expanded = ap_pregsub(request->pool, rule.target, path.c_str(), AP_MAX_REG_MATCH, matches);
+            if (!expanded) return NULL;
+            expected = expanded;
+        }
+        else
+        {
+            const std::string prefix(rule.prefix);
+            if (path.compare(0, prefix.size(), prefix)) continue;
+            expected = std::string(rule.target) + path.substr(prefix.size());
+        }
+        if (!strcmp(rule.target, "!")) return NULL;
+        if (!actual.empty())
+        {
+            if (sameProxyTarget(request, expected, actual)) return &rule;
+            // A different mapping or rewrite won. Never label its expanded
+            // URL using a merely matching, but inactive, prefix.
+            continue;
+        }
+        if (!requireResolvedTarget && rule.location) return &rule;
+    }
+    return NULL;
+}
+
+std::string routingSpanName(request_rec* request, bool client, bool resolved = false)
+{
+    const std::string method = httpSpanName(request->method);
+    auto cfg = ApacheConfigHandlers::getConfig(request);
+    const char* explicitTarget = cfg ? (client ? cfg->getClientSpanTarget() : cfg->getServerSpanTarget()) : NULL;
+    if (explicitTarget) return *explicitTarget ? method + " " + explicitTarget : method;
+    const auto rule = namingRule(request, resolved || client);
+    if (!rule) return method;
+    std::vector<std::string> groups;
+    const std::string serverTarget = rule->regex ? regexTarget(rule->prefix, groups) : pathTarget(rule->prefix);
+    if (!client) return method + " " + serverTarget;
+    apr_uri_t uri;
+    if (apr_uri_parse(request->pool, rule->target, &uri) != APR_SUCCESS || !uri.hostname ||
+        strpbrk(uri.hostname, "$%{}")) return method;
+    std::string path = uri.path ? uri.path : "/";
+    if (rule->regex)
+    {
+        std::string converted;
+        for (size_t i = 0; i < path.size(); ++i)
+        {
+            if ((path[i] == '$' || path[i] == '\\') && i + 1 < path.size() &&
+                path[i + 1] >= '1' && path[i + 1] <= '9')
+            {
+                const unsigned int index = path[++i] - '1';
+                converted += index < groups.size() ? groups[index] : "{param" + std::to_string(index + 1) + "}";
+            }
+            else converted += path[i];
+        }
+        path = converted;
+    }
+    else path = pathTarget(path);
+    std::string authority = strchr(uri.hostname, ':') ? "[" + std::string(uri.hostname) + "]" : uri.hostname;
+    if (uri.port_str) authority += ":" + std::string(uri.port_str);
+    return method + " " + authority + path;
 }
 
 std::string sanitizedQuery(const std::string& query)
@@ -409,7 +535,10 @@ int ApacheHooks::otel_proxy_handler(request_rec* request)
     otel::core::InteractionPayload payload("mod_proxy.c", "handler", false);
     payload.modern_http_attributes = true;
     payload.http_client = true;
-    payload.span_name = httpSpanName(request->method);
+    payload.span_name = routingSpanName(request, true, true);
+    const std::string serverName = routingSpanName(request, false, true);
+    apr_pool_userdata_set(apr_pstrdup(request->pool, serverName.c_str()), OTEL_SERVER_NAME_KEY,
+        apr_pool_cleanup_null, request->pool);
     apr_pool_userdata_set(apr_pstrdup(request->pool, target.c_str()), OTEL_UPSTREAM_URL_KEY,
         apr_pool_cleanup_null, request->pool);
     for (const char* note : {"proxy-status", "proxy_timedout", "otel_backend_peer",
@@ -1152,7 +1281,7 @@ void fillRequestPayload(request_rec* request, otel::core::RequestPayload* payloa
 #endif
 
     payload->set_port(ap_default_port(request));
-    const std::string operationName = httpSpanName(request->method);
+    const std::string operationName = routingSpanName(request, false);
     payload->set_operation_name(operationName.c_str());
 }
 // We have to use this hook if we want to use directory level configuration.
@@ -1167,7 +1296,7 @@ int ApacheHooks::otel_hook_header_parser_begin(request_rec *r)
         return DECLINED;
     }
     otel_cfg* routeConfig = ApacheConfigHandlers::getConfig(r);
-    if (routeConfig && !routeIsTraceable(
+    if (!routeConfig || !routeIsTraceable(
         r->parsed_uri.path, routeConfig->getTraceRoutes()))
     {
         return DECLINED;
@@ -1287,6 +1416,8 @@ int ApacheHooks::otel_hook_log_transaction_end(request_rec* r)
         (new otel::core::ResponsePayload);
     responsePayload->status_code = r->status;
     responsePayload->modern_http_attributes = true;
+    const char* finalName = static_cast<const char*>(requestPoolValue(r, OTEL_SERVER_NAME_KEY));
+    if (finalName) responsePayload->span_name = finalName;
     if (r->connection->aborted) responsePayload->error_type = "connection_aborted";
     otel_cfg* requestConfig = ApacheConfigHandlers::getConfig(r);
     if (!requestConfig || requestConfig->getCaptureResponseHeaders())

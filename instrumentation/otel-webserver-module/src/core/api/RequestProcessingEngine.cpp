@@ -144,6 +144,7 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
 
     RequestContext* requestContext = (RequestContext*)reqHandle;
     auto rootSpan = requestContext->rootSpan();
+    if (payload && !payload->span_name.empty()) rootSpan->UpdateName(payload->span_name);
 
     // End all the active interactions one by one if they aren't closed.
     // Even if we end parent span, child spans might remain active. We need

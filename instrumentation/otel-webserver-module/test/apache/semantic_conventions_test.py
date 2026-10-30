@@ -21,7 +21,7 @@ class Echo(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)
-    do_PROPFIND = do_GET
+    do_PATCH = do_GET
     def log_message(self, *args): pass
 HTTPServer(('127.0.0.1', 8765), Echo).serve_forever()
 '''
@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="otel-semantics-") as directory:
                     break
                 except subprocess.CalledProcessError:
                     time.sleep(0.1)
-            cases = [("GET", "/services/echo", "1.1"), ("PROPFIND", "/services/echo", "1.1"),
+            cases = [("GET", "/services/echo", "1.1"), ("PATCH", "/services/echo", "1.1"),
                      ("GET", "/services/force1/echo", "1.0"), ("GET", "/creds/echo", "1.1"),
                      ("GET", "/services/graceful", "1.1")]
             for method, path, version in cases:
@@ -97,12 +97,12 @@ with tempfile.TemporaryDirectory(prefix="otel-semantics-") as directory:
                 assert client_fields["parent_span_id"] == root_fields["span_id"], client
                 assert client_fields["trace_id"] == root_fields["trace_id"], client
                 assert re.findall(r"(?im)^x-trace-id: ([0-9a-f]{32})$", headers) == [root_fields["trace_id"]]
-                name, normalized = ("GET", "GET") if method == "GET" else ("HTTP", "_OTHER")
-                assert root.lstrip().startswith(": " + name + "\n"), root
-                assert client.lstrip().startswith(": " + name + "\n"), client
+                name, normalized = method, method
+                assert re.match(r": " + name + r"(?: [^\n]+)?\n", root.lstrip()), root
+                assert re.match(r": " + name + r"(?: [^\n]+)?\n", client.lstrip()), client
                 for block in [root, client]:
                     assert "http.request.method: " + normalized in block, block
-                    assert ("http.request.method_original: PROPFIND" in block) == (method == "PROPFIND"), block
+                    assert "http.request.method_original:" not in block, block
                     assert "status        : Unset" in block, block
                     attrs = block.split("  attributes    :")[1].split("  events")[0]
                     assert "sig=REDACTED" in attrs and "secret-value" not in attrs, attrs

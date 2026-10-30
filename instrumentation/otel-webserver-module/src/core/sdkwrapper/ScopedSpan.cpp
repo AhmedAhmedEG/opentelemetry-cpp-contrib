@@ -42,6 +42,11 @@ void ScopedSpan::End()
 	mSpan->End();
 }
 
+void ScopedSpan::UpdateName(const std::string& name)
+{
+    mSpan->UpdateName(name);
+}
+
 void ScopedSpan::AddEvent(const std::string& name,
 	const std::chrono::system_clock::time_point &timePoint,
     const OtelKeyValueMap& attributes)

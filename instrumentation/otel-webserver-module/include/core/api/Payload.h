@@ -116,6 +116,7 @@ public:
 
 struct ResponsePayload
 {
+    std::string span_name;
     bool modern_http_attributes = false;
     std::string error_type;
     std::unordered_map<std::string, std::vector<std::string>> header_attributes;
