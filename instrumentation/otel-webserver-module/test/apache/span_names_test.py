@@ -52,6 +52,15 @@ ApacheModuleOtelPropagatorExtract OFF
 ApacheModuleOtelPropagatorInject ON
 ApacheModuleReportAllInstrumentedModules ON
 ProxyPass /services/ http://127.0.0.1:8765/dxl/
+ProxyPass /dns/ http://localhost:8765/dxl/
+<Location /logical/>
+    RequestHeader set Host gateway.example
+    ProxyPass http://127.0.0.1:8765/dxl/
+</Location>
+<Location /logical-port/>
+    RequestHeader set Host gateway.example:9443
+    ProxyPass http://127.0.0.1:8765/dxl/
+</Location>
 ProxyPass /first/ http://127.0.0.1:8765/general/
 ProxyPass /first/special/ http://127.0.0.1:8765/unreachable/
 ProxyPass /second/special/ http://127.0.0.1:8765/specific/
@@ -115,18 +124,21 @@ with tempfile.TemporaryDirectory(prefix="otel-route-names-") as directory:
             except subprocess.CalledProcessError:
                 time.sleep(0.1)
         cases = [
-            ("/services/", "/services/{path}", "127.0.0.1:8765/dxl/{path}", "/dxl/"),
-            ("/location/", "/location/{path}", "127.0.0.1:8765/loc/{path}", "/loc/"),
-            ("/location/special/", "/location/special/{path}", "127.0.0.1:8765/chosen/{path}", "/chosen/"),
-            ("/first/special/", "/first/{path}", "127.0.0.1:8765/general/{path}", "/general/special/"),
-            ("/second/special/", "/second/special/{path}", "127.0.0.1:8765/specific/{path}", "/specific/"),
-            ("/rx/123/", "/rx/{param1}/{path}", "127.0.0.1:8765/r/{param1}/{path}", "/r/123/"),
-            ("/rx/456/", "/rx/{param1}/{path}", "127.0.0.1:8765/r/{param1}/{path}", "/r/456/"),
+            ("/dns/", "/dns/{path}", "localhost/dxl/{path}", "/dxl/"),
+            ("/logical/", "/logical/{path}", "gateway.example/dxl/{path}", "/dxl/"),
+            ("/logical-port/", "/logical-port/{path}", "gateway.example/dxl/{path}", "/dxl/"),
+            ("/services/", "/services/{path}", "127.0.0.1/dxl/{path}", "/dxl/"),
+            ("/location/", "/location/{path}", "127.0.0.1/loc/{path}", "/loc/"),
+            ("/location/special/", "/location/special/{path}", "127.0.0.1/chosen/{path}", "/chosen/"),
+            ("/first/special/", "/first/{path}", "127.0.0.1/general/{path}", "/general/special/"),
+            ("/second/special/", "/second/special/{path}", "127.0.0.1/specific/{path}", "/specific/"),
+            ("/rx/123/", "/rx/{param1}/{path}", "127.0.0.1/r/{param1}/{path}", "/r/123/"),
+            ("/rx/456/", "/rx/{param1}/{path}", "127.0.0.1/r/{param1}/{path}", "/r/456/"),
             ("/explicit/", "/configured/{id}", "configured-backend/items/{id}", "/explicit/"),
             ("/explicit/automatic/", "", "", "/explicit/automatic/"),
             ("/rewrite/", "/rewrite/{path}", "rewrite-backend/rewritten/{path}", "/rewritten/"),
-            ("/services/", "/services/{path}", "127.0.0.1:8765/dxl/{path}", "/dxl/", "inherited.example"),
-            ("/vhost/", "/vhost/{path}", "127.0.0.1:8765/tenant/{path}", "/tenant/", "isolated.example"),
+            ("/services/", "/services/{path}", "127.0.0.1/dxl/{path}", "/dxl/", "inherited.example"),
+            ("/vhost/", "/vhost/{path}", "127.0.0.1/tenant/{path}", "/tenant/", "isolated.example"),
         ]
         count = 0
         for case in cases:
@@ -163,6 +175,13 @@ with tempfile.TemporaryDirectory(prefix="otel-route-names-") as directory:
                     assert client.splitlines()[0].split(":", 1)[1].strip() == expected_client, client
                     assert attributes(server) == server_attributes, attributes(server)
                     assert attributes(client) == client_attributes, attributes(client)
+                    expected_host = "gateway.example" if prefix.startswith("/logical") else ("localhost" if prefix == "/dns/" else "127.0.0.1")
+                    expected_port = "9443" if prefix == "/logical-port/" else "8765"
+                    assert value(client, "server.address") == expected_host, client
+                    assert value(client, "server.port") == expected_port, client
+                    assert value(client, "url.full").startswith("http://" + expected_host + ":" + expected_port + "/"), client
+                    assert value(client, "network.peer.address") in ("127.0.0.1", "::1"), client
+                    assert value(client, "network.peer.port") == "8765", client
                     assert value(client, "parent_span_id") == value(server, "span_id"), client
                     assert echo["traceparent"].split("-")[2] == value(client, "span_id"), echo
                     assert re.findall(r"(?im)^x-trace-id: ([0-9a-f]{32})$", headers) == [value(server, "trace_id")]

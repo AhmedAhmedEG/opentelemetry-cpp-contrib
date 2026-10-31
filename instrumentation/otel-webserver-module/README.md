@@ -94,7 +94,9 @@ the SERVER span. Backend information uses standard `server.address`,
 `server.port`, `url.full`, `http.response.status_code` and available connection
 attributes on that CLIENT span. Its active context is propagated downstream.
 HTTP names combine the method with a bounded configured routing target, e.g.
-`GET /api/{path}` and `GET backend.example/v1/{path}`. Static ProxyPass,
+`GET /api/{path}` and `GET backend.example/v1/{path}`. Automatic CLIENT names
+use the logical backend hostname (including Host overrides for IP targets),
+with IP fallback and no port; port attributes and URLs remain intact. Static ProxyPass,
 Location and ProxyPassMatch mappings are recognized automatically.
 `ApacheModuleServerSpanTarget` / `ApacheModuleClientSpanTarget` supply literal
 labels for complex rewrites; `""` forces method-only names. Unmatched routes

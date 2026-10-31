@@ -188,6 +188,8 @@ const OtelProxyNameRule* namingRule(request_rec* request, bool requireResolvedTa
     return NULL;
 }
 
+std::string upstreamUrl(request_rec* request);
+
 std::string routingSpanName(request_rec* request, bool client, bool resolved = false)
 {
     const std::string method = httpSpanName(request->method);
@@ -219,9 +221,16 @@ std::string routingSpanName(request_rec* request, bool client, bool resolved = f
         path = converted;
     }
     else path = pathTarget(path);
-    std::string authority = strchr(uri.hostname, ':') ? "[" + std::string(uri.hostname) + "]" : uri.hostname;
-    if (uri.port_str) authority += ":" + std::string(uri.port_str);
-    return method + " " + authority + path;
+    // Share the logical hostname selection used by server.address/url.full.
+    // Keep the configured path template: the expanded request URL contains IDs.
+    // Ports remain in server.port/url.full rather than cluttering the span name.
+    const std::string target = upstreamUrl(request);
+    apr_uri_t logical;
+    const char* hostname = uri.hostname;
+    if (apr_uri_parse(request->pool, target.c_str(), &logical) == APR_SUCCESS && logical.hostname)
+        hostname = logical.hostname;
+    const std::string label = strchr(hostname, ':') ? "[" + std::string(hostname) + "]" : hostname;
+    return method + " " + label + path;
 }
 
 std::string sanitizedQuery(const std::string& query)

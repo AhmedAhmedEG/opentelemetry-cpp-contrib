@@ -124,6 +124,9 @@ SSLProxyCheckPeerCN off
                 expected_url = 'https://' + (backend_host if ':' in backend_host else backend_host + ':8765') + pairs['x-echo-path']
                 match = re.search(r'(?m)^\s*url\.full: (.*)$', logs)
                 assert match and match.group(1) == expected_url, logs
+                client_block = next(b for b in logs.split("{\n  name")[1:] if "span kind     : Client" in b)
+                client_name = client_block.splitlines()[0].split(":", 1)[1].strip()
+                assert client_name == "GET gateway.example/{path}", client_block
                 spans = span_records(logs)
                 root = next(span for span in spans if span.get('span kind') == 'Server')
                 wire = pairs['traceparent']
@@ -132,7 +135,7 @@ SSLProxyCheckPeerCN off
                              and client['parent_span_id'] == root['span_id'] and 'tracestate' not in pairs)
                 if not inject:
                     valid = wire == INCOMING and pairs.get('tracestate') == 'vendor=restored'
-                result = {'backend_host': backend_host, 'upstream_url': match.group(1), 'competing_writer': competing, 'inject': inject, 'preserve_host': preserve_host, 'request_index': index,
+                result = {'backend_host': backend_host, 'upstream_url': match.group(1), 'client_name': client_name, 'competing_writer': competing, 'inject': inject, 'preserve_host': preserve_host, 'request_index': index,
                           'root': root, 'wire': wire, 'tracestate': pairs.get('tracestate'),
                           'client': client, 'valid': valid}
                 results.append(result)

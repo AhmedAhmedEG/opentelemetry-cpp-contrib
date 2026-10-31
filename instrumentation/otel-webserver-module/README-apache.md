@@ -119,8 +119,7 @@ verified against its resolved proxy destination; request IDs and query values
 never become name targets. Native mapping order and Location overrides apply.
 
 For complex rewrites or application-specific templates, set static labels in
-server, VirtualHost or Location configuration (prefix each directive below
-with `ApacheModule`):
+server, VirtualHost or Location configuration:
 
 ```apache
 <Location /api/>
@@ -194,6 +193,13 @@ Port/status attributes are integers. Query strings are not decoded into JSON.
 `X-Amz-Credential`, `X-Amz-Security-Token`, `sig` and `X-Goog-Signature` query
 values are replaced by `REDACTED` in URL attributes; actual traffic is unchanged.
 Custom captured header values retain the requested raw behavior.
+
+Automatic CLIENT names use that same logical backend hostname, followed by
+the configured path template, e.g. `GET backend.example/v1/{path}`. Ports are
+kept in `server.port` and `url.full`, not the automatic span name. A configured
+DNS target retains its hostname; an IP target uses a changed Host override
+when available. Otherwise the IP is the fallback. Explicit `ClientSpanTarget`
+labels remain literal and take precedence.
 
 For IP proxy targets, a changed `RequestHeader set Host` hostname identifies
 the logical backend in the trace. Explicit Host ports win, otherwise the target
