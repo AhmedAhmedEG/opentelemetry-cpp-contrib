@@ -407,3 +407,57 @@ TEST(TestRequestProcessingEngine, EndInteractionInvalidParams)
 	EXPECT_EQ(res, OTEL_STATUS(invalid_context));
 }
 
+
+
+TEST(TestRequestProcessingEngine, ModernHttpFailureOwnership)
+{
+    struct Scenario {
+        bool client;
+        unsigned int backendStatus;
+        const char* failure;
+        unsigned int finalStatus;
+        bool childError;
+        bool serverError;
+    };
+    const Scenario cases[] = {
+        {true, 200, "", 200, false, false},
+        {true, 302, "", 302, false, false},
+        {true, 400, "", 400, true, false},
+        {true, 404, "", 200, true, false},
+        {true, 499, "", 499, true, false},
+        {true, 500, "", 500, true, true},
+        {true, 503, "", 200, true, true},
+        {true, 0, "proxy_error", 502, true, true},
+        {false, 0, "internal_error", 200, true, true},
+        {false, 0, "", 404, false, false},
+    };
+    for (const auto& scenario : cases) {
+        SCOPED_TRACE(::testing::Message() << scenario.client << ":" << scenario.backendStatus
+            << ":" << scenario.failure << ":" << scenario.finalStatus);
+        FakeRequestProcessingEngine engine;
+        std::shared_ptr<otel::core::TenantConfig> config;
+        engine.init(config, std::make_shared<otel::core::SpanNamer>());
+        auto root = std::make_shared<::testing::NiceMock<MockScopedSpan>>();
+        auto child = std::make_shared<::testing::NiceMock<MockScopedSpan>>();
+        auto context = new otel::core::RequestContext(root);
+        context->addInteraction(child);
+        EXPECT_CALL(*child, SetStatus(scenario.childError ? StatusCode::Error : StatusCode::Unset, "")).Times(1);
+        EXPECT_CALL(*root, SetStatus(scenario.serverError ? StatusCode::Error : StatusCode::Unset, "")).Times(1);
+        otel::core::EndInteractionPayload end("", "", 0, "");
+        end.modern_http_attributes = true;
+        end.http_client = scenario.client;
+        end.http_status_code = scenario.backendStatus;
+        end.error_type = scenario.failure;
+        ASSERT_EQ(engine.endInteraction(context, false, &end), OTEL_SUCCESS);
+        // A later successful INTERNAL stage must not erase a retained failure.
+        auto later = std::make_shared<::testing::NiceMock<MockScopedSpan>>();
+        context->addInteraction(later);
+        otel::core::EndInteractionPayload clean("", "", 0, "");
+        clean.modern_http_attributes = true;
+        ASSERT_EQ(engine.endInteraction(context, false, &clean), OTEL_SUCCESS);
+        otel::core::ResponsePayload response;
+        response.modern_http_attributes = true;
+        response.status_code = scenario.finalStatus;
+        ASSERT_EQ(engine.endRequest(context, nullptr, &response), OTEL_SUCCESS);
+    }
+}

@@ -630,6 +630,15 @@ void ApacheHooks::otel_stopInteraction(request_rec *r, bool isAlwaysRunStage, bo
             if (port) payload->numeric_attributes["network.peer.port"] = atoi(port);
             if (protocol) payload->attributes["network.protocol.version"] = protocol;
         }
+        else
+        {
+            // Attribute only a new server failure observed during this stage.
+            // Existing backend errors must not mark subsequent INTERNAL spans.
+            const char* initial = apr_table_get(r->notes, "otel_internal_initial_status");
+            if (initial && atoi(initial) < 500 && r->status >= 500)
+                payload->error_type = std::to_string(r->status);
+        }
+        apr_table_unset(r->notes, "otel_internal_initial_status");
         OTEL_SDK_STATUS_CODE res = wsAgent.endInteraction(reqHandlePtr, ignoreBackend, payload.get());
         apr_table_unset(r->notes, OTEL_HTTP_CLIENT_KEY);
 
@@ -683,6 +692,7 @@ OTEL_SDK_STATUS_CODE ApacheHooks::otel_startInteraction(
 
         if (OTEL_ISSUCCESS(res))
         {
+            apr_table_set(r->notes, "otel_internal_initial_status", std::to_string(r->status).c_str());
             // remove the singularity header if any
             apr_table_unset(r->headers_in, OTEL_CORRELATION_HEADER_KEY);
             if (!propagationHeaders.empty())

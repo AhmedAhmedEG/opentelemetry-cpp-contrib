@@ -182,9 +182,18 @@ error.type                    # backend HTTP 4xx/5xx, timeout or proxy_error
 The CLIENT span is a child of the SERVER span and supplies the outgoing
 propagation context, so an instrumented backend can become its child. Backend
 status comes from `proxy-status`; Apache-generated failures do not invent a
-backend status. HTTP 1xx/2xx/3xx leave span status unset; SERVER 4xx is unset,
-CLIENT 4xx is error, and 5xx is error. Other instrumented Apache stages are
-INTERNAL spans, with module/stage names and no copied HTTP attributes.
+backend status. Successful 1xx/2xx/3xx responses leave status UNSET unless an
+observed failure was retained. Backend 4xx marks only CLIENT ERROR; SERVER
+stays UNSET. Backend 5xx, Apache's final 5xx response and observed internal
+request failures mark SERVER ERROR. Backend 5xx and INTERNAL failures remain
+recorded even if a later handler recovers to HTTP 200 or 4xx. A CLIENT transport
+failure marks CLIENT ERROR; Apache's generated 5xx also marks SERVER ERROR.
+
+Other instrumented Apache stages are INTERNAL spans, with module/stage names
+and no copied HTTP attributes. A new transition to HTTP 5xx observed while an
+INTERNAL stage is active marks that stage ERROR and retains the failure for
+SERVER. Already-existing backend errors do not mark later INTERNAL stages.
+Failed spans include `error.type`; successful stages stay UNSET.
 `ReportAllInstrumentedModules OFF` still records the real proxy CLIENT span.
 No `http.upstream.*` or `http.proxy.*` aliases are emitted.
 

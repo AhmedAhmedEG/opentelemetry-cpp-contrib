@@ -19,6 +19,7 @@
 
 #include <memory>
 #include <stack>
+#include <string>
 
 namespace otel {
 namespace core {
@@ -48,6 +49,12 @@ public:
 
     std::shared_ptr<sdkwrapper::IScopedSpan> rootSpan() const { return m_rootSpan; }
 
+    void recordFailure(const std::string& type) {
+        if (m_failureType.empty()) m_failureType = type;
+    }
+
+    const std::string& failureType() const { return m_failureType; }
+
     void addInteraction(std::shared_ptr<sdkwrapper::IScopedSpan> interaction) {
         m_interactions.push(interaction);
     }
@@ -76,6 +83,7 @@ public:
 private:
     std::shared_ptr<sdkwrapper::IScopedSpan> m_rootSpan;
     std::string m_contextName;
+    std::string m_failureType;
 
     /**
       List of all the active interactions associated with this request

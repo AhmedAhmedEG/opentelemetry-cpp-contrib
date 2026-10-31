@@ -160,7 +160,8 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
 
     // check for error and set attribute in the scopedSpan.
     if (payload && payload->modern_http_attributes) {
-        const bool failed = payload->status_code >= 500 || !payload->error_type.empty() || (!payload->status_code && error);
+        const bool failed = payload->status_code >= 500 || !payload->error_type.empty() ||
+            !requestContext->failureType().empty() || (!payload->status_code && error);
         rootSpan->SetStatus(failed ? StatusCode::Error : StatusCode::Unset);
     } else if (error) {
         std::stringstream strValue;
@@ -212,9 +213,10 @@ OTEL_SDK_STATUS_CODE RequestProcessingEngine::endRequest(
         }
         else
             rootSpan->AddAttribute(kAttrHTTPStatusCode, payload->status_code);
-        if (payload->modern_http_attributes && (!payload->error_type.empty() || payload->status_code >= 500))
-            rootSpan->AddAttribute("error.type", payload->error_type.empty()
-                ? std::to_string(payload->status_code) : payload->error_type);
+        if (payload->modern_http_attributes && (!payload->error_type.empty() ||
+            !requestContext->failureType().empty() || payload->status_code >= 500))
+            rootSpan->AddAttribute("error.type", !payload->error_type.empty() ? payload->error_type :
+                (!requestContext->failureType().empty() ? requestContext->failureType() : std::to_string(payload->status_code)));
     }
 
     LOG4CXX_TRACE(mLogger, "Ending root span with id: " << rootSpan.get());
@@ -301,10 +303,16 @@ OTEL_SDK_API OTEL_SDK_STATUS_CODE RequestProcessingEngine::endInteraction(
             interactionSpan->AddAttribute(attribute.first, attribute.second);
         for (const auto& attribute : payload->numeric_attributes)
             interactionSpan->AddAttribute(attribute.first, attribute.second);
-        const bool failed = payload->http_client &&
-            (payload->http_status_code >= 400 || !payload->error_type.empty());
+        const bool failed = !payload->error_type.empty() ||
+            (payload->http_client && payload->http_status_code >= 400);
+        // A CLIENT 4xx belongs only to that span. Retain backend 5xx and
+        // observed INTERNAL failures even if a later handler returns 2xx/4xx.
+        if ((payload->http_client && payload->http_status_code >= 500) ||
+            (!payload->http_client && failed))
+            rContext->recordFailure(payload->error_type.empty()
+                ? std::to_string(payload->http_status_code) : payload->error_type);
         interactionSpan->SetStatus(failed ? StatusCode::Error : StatusCode::Unset);
-        if (payload->http_status_code)
+        if (payload->http_client && payload->http_status_code)
             interactionSpan->AddAttribute("http.response.status_code", static_cast<int64_t>(payload->http_status_code));
         if (failed)
             interactionSpan->AddAttribute("error.type", payload->error_type.empty()
